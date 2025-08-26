@@ -1,0 +1,13 @@
+.env
+.venv/
+env/
+venv/
+config/settings.yml
+
+logs/
+!logs/.gitkeep
+storage/celery/
+storage/seed/state.json
+
+__pycache__/
+*.pyc

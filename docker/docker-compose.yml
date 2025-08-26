@@ -1,0 +1,87 @@
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: api
+    env_file: [../.env]
+    ports: ["8000:8000"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: worker
+    command: celery -A worker.tasks worker --loglevel=INFO
+    env_file: [../.env]
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  beat:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: beat
+    command: >
+      celery -A worker.tasks beat
+      --loglevel=INFO
+      --schedule /app/storage/celery/celerybeat-schedule
+    env_file: [../.env]
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    volumes:
+      - ../storage/celery:/app/storage/celery
+    restart: unless-stopped
+
+  redis:
+    image: ${REDIS_IMAGE}
+    pull_policy: missing
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  db:
+    image: ${POSTGRES_IMAGE}
+    pull_policy: missing
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kommo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kommo}
+      POSTGRES_DB: ${POSTGRES_DB:-kommo}
+    ports: ["5432:5432"]
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-kommo} -d ${POSTGRES_DB:-kommo}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  db_data:

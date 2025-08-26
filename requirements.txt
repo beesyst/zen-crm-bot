@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+pydantic
+requests
+httpx
+jinja2
+celery
+redis
+sqlalchemy
+psycopg2-binary
+pyyaml
+python-dotenv
+python-json-logger
+playwright==1.54.0
+python-multipart==0.0.20
