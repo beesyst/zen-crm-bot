@@ -157,3 +157,11 @@ class KommoAdapter:
     def add_company_note(self, company_id: int, text: str) -> None:
         payload = [{"note_type": "common", "params": {"text": text}}]
         self._req("POST", f"/api/v4/companies/{company_id}/notes", json=payload)
+
+    def get_company(self, company_id: int) -> Dict[str, Any]:
+        return self._req("GET", f"/api/v4/companies/{company_id}")
+
+    def get_company_tags(self, company: Dict[str, Any]) -> List[str]:
+        return [
+            t.get("name", "") for t in (company.get("_embedded", {}).get("tags") or [])
+        ]
