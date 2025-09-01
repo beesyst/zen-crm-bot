@@ -209,16 +209,16 @@ zen-crm-bot/
 
 ### Диаграмма пайплайна
 
-```mermaid
-flowchart TD
+```flowchart TD
     A[sites.yml / внешние источники] --> B[Seed компаний]
     B -->|создание + теги bot,new| C[Kommo CRM компании]
     C --> D[Режим обогащения]
     D -->|парсинг, соцсети, контакты| E[Обновление кастомных полей]
     E --> F[Bootstrap лида → READY_FOR_OUTREACH]
-    F --> G[План аутрича (email, Discord, TG...)]
+    F --> G[План аутрича: email, Discord, Telegram]
     G --> H[Рассылка сообщений]
     H --> I[Финализация: заметки + стадии]
+```
  
 ## Установка и запуск
 
