@@ -84,7 +84,7 @@ def sh_log_host(cmd: list[str], cwd: Path | None = None, echo: bool = False) -> 
     )
     console_marker_re = re.compile(r"^\[(skip|add|update|ok|error)\b", re.IGNORECASE)
     plain_marker_re = re.compile(r"^(Start|Finish)$")
-    spinner_frame_re = re.compile(r"^\[(\||/|-|\\)\] ")
+    spinner_frame_re = re.compile(r"^\r?\[(\||/|-|\\)\] ")
     compose_runtime_re = re.compile(
         r"^ ?Container .*  (Running|Started|Starting|Created|Recreated|Healthy|Built)$"
     )
@@ -110,7 +110,6 @@ def sh_log_host(cmd: list[str], cwd: Path | None = None, echo: bool = False) -> 
                 continue
 
             # удалить CR (кадры спиннера печатаются с '\r') и ANSI ESC-последовательности
-            line = line.replace("\r", "")
             line = ansi_re.sub("", line)
 
             if not line:
@@ -122,11 +121,14 @@ def sh_log_host(cmd: list[str], cwd: Path | None = None, echo: bool = False) -> 
                 host_log_file.flush()
                 continue
 
-            # кадры спиннера вида "[|] msg", "[/] msg", "[-] msg", "[\] msg" - игнор
+            # кадры спиннера вида "[|] msg", "[/] msg", "[-] msg", "[\] msg" — показываем в терминале без \n
             if spinner_frame_re.match(line):
+                if echo:
+                    sys.stdout.write(line + "\r")
+                    sys.stdout.flush()
                 continue
 
-            # "Start"/"Finish" из ВНУТРЕННЕГО процесса - подавляем целиком (и из echo, и из host.log)
+            # "Start"/"Finish" из ВНУТРЕННЕГО процесса — подавляем целиком (и из echo, и из host.log)
             if plain_marker_re.match(line):
                 continue
 

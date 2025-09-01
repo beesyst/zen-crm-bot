@@ -47,8 +47,11 @@ def _clear_inline() -> None:
 def _spin_once_short(msg: str) -> None:
     if not _SPINNER_ENABLED:
         return
-    _emit(f"[/] {msg}")
-    time.sleep(_SPIN_DELAY_SHORT)
+    frames = list(_SPIN_FRAMES_SHORT)
+    for i in range(_SPIN_TICKS_SHORT):
+        frame = frames[i % len(frames)]
+        _emit_inline(f"\r[{frame}] {msg}")
+        time.sleep(_SPIN_DELAY_SHORT)
 
 
 # Рамка начала пайплайна, спиннер не нужен
