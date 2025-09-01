@@ -5,8 +5,6 @@ import re
 import shutil
 import subprocess
 import sys
-import threading
-import time
 from pathlib import Path
 from textwrap import dedent
 
@@ -18,6 +16,7 @@ if str(PROJECT_ROOT_FALLBACK) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT_FALLBACK))
 
 # Локальные импорты инфраструктуры
+from core.console import step
 from core.log_setup import clear_all_logs, get_logger
 from core.paths import (
     LOG_PATHS,
@@ -43,50 +42,6 @@ DOCKER_DIR = ROOT / "docker"
 ENV_FILE = ROOT / ".env"
 ENV_EXAMPLE = ROOT / ".env.example"
 ENV_TPL_FILE = ROOT / "core" / "templates" / ".env.stub.tpl"
-
-# Кадры спиннера
-_SPIN = ["|", "/", "-", "\\"]
-
-
-# Спиннер: красивая анимация выполнения шага + возврат ok/err
-def spinner_run(label: str, worker: callable) -> bool:
-    done = threading.Event()
-    state = {"ok": False, "label": label, "suffix": ""}
-
-    def spin():
-        i = 0
-        while not done.is_set():
-            sym = _SPIN[i % len(_SPIN)]
-            print(f"\r[{sym}] {state['label']}", end="", flush=True)
-            i += 1
-            time.sleep(0.15)
-
-    t = threading.Thread(target=spin, daemon=True)
-    t.start()
-    try:
-        ok, suffix = worker()
-        state["ok"] = bool(ok)
-        state["suffix"] = (suffix or "").strip()
-    except Exception:
-        state["ok"] = False
-        state["suffix"] = ""
-    finally:
-        done.set()
-        t.join()
-        prefix = "[ok]" if state["ok"] else "[error]"
-        tail = f" {state['suffix']}" if state["suffix"] else ""
-        print(f"\r{prefix} {state['label']}{tail}{' ' * 40}")
-    return state["ok"]
-
-
-# Хелпер: короткие статусы без спиннера
-def step_ok(text: str):
-    print(f"[ok] {text}")
-
-
-# Хелпер
-def step_error(text: str):
-    print(f"[error] {text}")
 
 
 # Shell: выполнение команды, стрим вывода в терминал
@@ -129,9 +84,12 @@ def sh_log_host(cmd: list[str], cwd: Path | None = None, echo: bool = False) -> 
     )
     console_marker_re = re.compile(r"^\[(skip|add|update|ok|error)\b", re.IGNORECASE)
     plain_marker_re = re.compile(r"^(Start|Finish)$")
+    spinner_frame_re = re.compile(r"^\[(\||/|-|\\)\] ")
     compose_runtime_re = re.compile(
         r"^ ?Container .*  (Running|Started|Starting|Created|Recreated|Healthy|Built)$"
     )
+    # ANSI CSI: \x1B[ ...  (убираем управляющие последовательности, в т.ч. возможные '\x1b[K')
+    ansi_re = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 
     host_log_path = Path(LOG_PATHS["host"]).resolve()
 
@@ -145,8 +103,16 @@ def sh_log_host(cmd: list[str], cwd: Path | None = None, echo: bool = False) -> 
     )
 
     with open(host_log_path, "a", encoding="utf-8") as host_log_file:
-        for line in proc.stdout or []:
-            line = line.rstrip("\n")
+        for raw in proc.stdout or []:
+            # первичная нормализация
+            line = raw.rstrip("\n")
+            if not line:
+                continue
+
+            # удалить CR (кадры спиннера печатаются с '\r') и ANSI ESC-последовательности
+            line = line.replace("\r", "")
+            line = ansi_re.sub("", line)
+
             if not line:
                 continue
 
@@ -156,17 +122,19 @@ def sh_log_host(cmd: list[str], cwd: Path | None = None, echo: bool = False) -> 
                 host_log_file.flush()
                 continue
 
-            # "Start"/"Finish" - не пишем в host.log, но в терминале оставляем (если echo=True)
-            if plain_marker_re.match(line):
-                if echo:
-                    print(line)
+            # кадры спиннера вида "[|] msg", "[/] msg", "[-] msg", "[\] msg" - игнор
+            if spinner_frame_re.match(line):
                 continue
 
-            # служебные сообщения docker compose - полностью игнорируем (и в host.log, и в терминале)
+            # "Start"/"Finish" из ВНУТРЕННЕГО процесса - подавляем целиком (и из echo, и из host.log)
+            if plain_marker_re.match(line):
+                continue
+
+            # служебные сообщения docker compose - игнор
             if compose_runtime_re.match(line):
                 continue
 
-            # короткие статусы [ok]/[skip]/[add]/[update]/[error] → в терминал (логгером не дублируем)
+            # короткие статусы [ok]/[skip]/[add]/[update]/[error] → только терминал (без логгера)
             if console_marker_re.match(line):
                 if echo:
                     print(line)
@@ -277,7 +245,7 @@ def ensure_files():
                 return False, "copy failed"
         return False, f"missing template {ENV_TPL_FILE}"
 
-    spinner_run(".env.example", _env_example)
+    step(".env.example", _env_example)
 
     # .env (копия .env.example), дальше sync_env_from_settings() допишет нужные пары
     def _env():
@@ -291,7 +259,7 @@ def ensure_files():
             run_and_capture(["/bin/sh", "-c", f"echo 'copy .env failed: {e}' 1>&2"])
             return False, "copy failed"
 
-    spinner_run(".env", _env)
+    step(".env", _env)
 
     # проверка наличия config/settings.yml
     def _settings():
@@ -300,7 +268,7 @@ def ensure_files():
             return True, ""
         return False, f"missing at {settings_yml}"
 
-    spinner_run("config/settings.yml", _settings)
+    step("config/settings.yml", _settings)
 
     # проверка compose-файлов
     def _compose_files():
@@ -309,7 +277,7 @@ def ensure_files():
         ok = base.exists() and override.exists()
         return (ok, "" if ok else f"missing {base if not base.exists() else override}")
 
-    spinner_run("docker-compose files", _compose_files)
+    step("docker-compose files", _compose_files)
 
 
 # Подготовка: очистка логов один раз, если включено в settings.yml
@@ -387,8 +355,8 @@ def check_prereqs(require_postgres: bool = True):
             return True, _suffix(out, "Docker Compose")
         return False, "not available"
 
-    ok &= spinner_run("Docker", _docker)
-    ok &= spinner_run("Docker Compose", _compose)
+    ok &= step("Docker", _docker)
+    ok &= step("Docker Compose", _compose)
 
     if require_postgres:
 
@@ -403,7 +371,7 @@ def check_prereqs(require_postgres: bool = True):
                 return True, _suffix(line, "postgres")
             return False, "not available"
 
-        ok &= spinner_run("Postgres", _postgres)
+        ok &= step("Postgres", _postgres)
 
     if not ok:
         print("\n[error] Docker/Postgres checks failed. See logs/setup.log")
@@ -439,13 +407,9 @@ def cmd_dev():
     check_required_files()
     _maybe_clear_logs_once()
     ensure_files()
-    spinner_run("Node deps (npm + playwright)", ensure_node_deps)
-
-    # значения для docker compose в окружение процесса
+    step("Node deps (npm + playwright)", ensure_node_deps)
     _export_compose_env()
-    # синхронизация .env из settings.yml (чтобы ручной compose тоже работал)
     sync_env_from_settings()
-    # рендер settings.example.yml (редактированные секреты)
     generate_settings_example()
 
     check_prereqs()
@@ -460,8 +424,7 @@ def cmd_dev_bg():
     check_required_files()
     _maybe_clear_logs_once()
     ensure_files()
-    spinner_run("Node deps (npm + playwright)", ensure_node_deps)
-
+    step("Node deps (npm + playwright)", ensure_node_deps)
     _export_compose_env()
     sync_env_from_settings()
     generate_settings_example()
@@ -469,13 +432,13 @@ def cmd_dev_bg():
 
     def _up():
         rc = sh_log_setup(compose_cmd("up", "-d", "--build"), cwd=DOCKER_DIR)
-        return (rc == 0), ""
+        return (rc == 0), ("" if rc == 0 else "compose up failed")
 
-    if not spinner_run("docker compose up (detached)", _up):
-        step_error("compose up failed")
+    if not step("docker compose up (detached)", _up):
         sys.exit(1)
 
     _run_modes_after_up()
+    print("Finish")
     sys.exit(0)
 
 
@@ -485,8 +448,7 @@ def cmd_prod_up():
     check_required_files()
     _maybe_clear_logs_once()
     ensure_files()
-    spinner_run("Node deps (npm + playwright)", ensure_node_deps)
-
+    step("Node deps (npm + playwright)", ensure_node_deps)
     _export_compose_env()
     sync_env_from_settings()
     generate_settings_example()
@@ -494,10 +456,9 @@ def cmd_prod_up():
 
     def _up_bg():
         rc = sh_log_setup(compose_cmd("up", "-d", "--build"), cwd=DOCKER_DIR)
-        return (rc == 0), ""
+        return (rc == 0), ("" if rc == 0 else "compose up failed")
 
-    if not spinner_run("docker compose up (detached)", _up_bg):
-        step_error("compose up failed")
+    if not step("docker compose up (detached)", _up_bg):
         sys.exit(1)
 
     _run_modes_after_up()
@@ -539,11 +500,11 @@ def cmd_prod_down():
 
     def _down():
         rc = sh_log_setup(compose_cmd("down"), cwd=DOCKER_DIR)
-        return (rc == 0), ""
+        return (rc == 0), ("" if rc == 0 else "compose down failed")
 
-    if not spinner_run("docker compose down", _down):
-        step_error("compose down failed")
+    if not step("docker compose down", _down):
         sys.exit(1)
+
     print("Finish")
     sys.exit(0)
 

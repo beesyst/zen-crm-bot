@@ -127,9 +127,9 @@ def _ensure_env_kv(env_path: Path, key: str, value: str) -> None:
 
 
 # Взятие из settings.yml значения images.<name> (или пустую строку)
-def _read_settings_image(name: str, default: str = "") -> str:
+def _read_settings_image(name: str) -> str:
     settings = _load_settings()
-    return (settings.get("images", {}) or {}).get(name, "") or default
+    return (settings.get("images", {}) or {}).get(name, "")
 
 
 # core/templates/settings.example.yml из settings.example.yml.tpl и config/settings.yml
@@ -150,12 +150,34 @@ def generate_settings_example() -> None:
         LOG.error("render settings example failed: %s", e)
 
 
+def _read_python_version() -> str:
+    s = _load_settings()
+    return (s.get("runtime", {}) or {}).get("python_version", "")
+
+
+def _read_python_debian() -> str:
+    s = _load_settings()
+    return (s.get("runtime", {}) or {}).get("python_debian", "")
+
+
 # Синхронизация .env с config/settings.yml для нужд docker-compose
 def sync_env_from_settings() -> None:
     try:
         _ensure_env_kv(ENV_PATH, "SETTINGS_PATH", "config/settings.yml")
         _ensure_env_kv(ENV_PATH, "POSTGRES_IMAGE", _read_settings_image("postgres"))
         _ensure_env_kv(ENV_PATH, "REDIS_IMAGE", _read_settings_image("redis"))
+
+        py = _read_python_version()
+        deb = _read_python_debian()
+        if not py or not deb:
+            raise ValueError(
+                "runtime.python_version и runtime.python_debian обязаны быть заданы в config/settings.yml"
+            )
+
+        _ensure_env_kv(ENV_PATH, "PYTHON_VERSION", py)
+        _ensure_env_kv(ENV_PATH, "PYTHON_DEBIAN", deb)
+
         LOG.info(".env synced from settings.yml")
     except Exception as e:
         LOG.error(".env sync failed: %s", e)
+        raise

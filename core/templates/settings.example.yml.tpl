@@ -1,8 +1,12 @@
 clear_logs: {{ clear_logs | default(true) }}
 
 images:
-  postgres: "{{ images.postgres | default('postgres:17.6') }}"
-  redis: "{{ images.redis | default('redis:8.2-alpine') }}"
+  postgres: "{{ images.postgres }}"
+  redis: "{{ images.redis }}"
+
+runtime:
+  python_version: "{{ runtime.python_version }}"
+  python_debian: "{{ runtime.python_debian }}"
 
 app:
   host: "{{ app.host | default('0.0.0.0') }}"

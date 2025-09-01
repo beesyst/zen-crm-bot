@@ -4,6 +4,10 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
       target: api
+      args:
+        PYTHON_VERSION: ${PYTHON_VERSION}
+        PYTHON_DEBIAN: ${PYTHON_DEBIAN}
+      network: host
     env_file: [../.env]
     ports: ["8000:8000"]
     depends_on:
@@ -26,6 +30,10 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
       target: worker
+      args:
+        PYTHON_VERSION: ${PYTHON_VERSION}
+        PYTHON_DEBIAN: ${PYTHON_DEBIAN}
+      network: host
     command: celery -A worker.tasks worker --loglevel=INFO
     env_file: [../.env]
     depends_on:
@@ -43,6 +51,10 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
       target: beat
+      args:
+        PYTHON_VERSION: ${PYTHON_VERSION}
+        PYTHON_DEBIAN: ${PYTHON_DEBIAN}
+      network: host
     command: >
       celery -A worker.tasks beat
       --loglevel=INFO
@@ -96,6 +108,10 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
       target: runtime
+      args:
+        PYTHON_VERSION: ${PYTHON_VERSION}
+        PYTHON_DEBIAN: ${PYTHON_DEBIAN}
+      network: host
     env_file: [../.env]
     depends_on:
       redis:

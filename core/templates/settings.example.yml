@@ -5,6 +5,10 @@ images:
   postgres: "postgres:17.6"
   redis: "redis:8.2-alpine"
 
+runtime:
+  python_version: "3.13.7"
+  python_debian: "slim-bookworm"
+
 app:
   host: "0.0.0.0"
   port: 8000

@@ -119,10 +119,10 @@ def run_research_pipeline(options: OrchestratorOptions | None = None) -> None:
                     # host.log
                     _log.info("Пропуск %s (уже есть)", url)
         except Exception as e:
-            # терминал
+            # терминал (идёт через console -> спиннеры там)
             error(url, str(e))
-            # host.log
-            _log.error("Ошибка %s - %s - %s", app, url, e)
+            # host.log с трейсбеком
+            _log.exception("Ошибка %s - %s", app, url)
             if opts.stop_on_error:
                 break
 
