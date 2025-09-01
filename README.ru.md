@@ -66,44 +66,53 @@ zen-crm-bot/
 │       └── crm/
 │           └── kommo.py             # Тонкий клиент Kommo API v4
 │   ├── routes/                      # HTTP-маршруты API
-│       ├── admin.py                 # Админ-ручки (seed, add\_note, service endpoints)
-│       └── webhooks.py              # Вебхуки от Kommo (bootstrap, события CRM)
+│       ├── admin.py                 # Служебные ручки (seed, notes, сервисные эндпоинты)
+│       └── webhooks.py              # Вебхуки Kommo (bootstrap лида и события CRM)
 │   ├── templates/                   # Jinja/HTML шаблоны
 │       └── email_outreach.html      # Шаблон писем для email-канала
-│   └── main.py                      # Точка входа FastAPI (инициализация, роуты)
+│   └── main.py                      # Инициализация FastAPI, DI, роуты
 │
-├── cli/                             # 
-│   ├── enrich.py                    # 
-│   └── research.py                  # 
+├── cli/                             # Одноразовые CLI-пайплайны (внутри docker job)
+│   ├── enrich.py                    # "Enrich Existing": обогащение компаний по тегам
+│   └── research.py                  # "Research & Intake": сидинг компаний из sites.yml
 │
 ├── config/                          # Конфигурация системы
 │   ├── settings.yml                 # Главный конфиг (infra, crm, mail, channels, outreach)
 │   ├── sites.yml                    # Список сайтов для seed-компаний
 │   └── start.py                     # Скрипт начальной настройки окружения
 │
-├── core/                            # Базовые утилиты и bootstrap
+├── core/                            # Базовая инфраструктура и утилиты
 │   ├── bootstrap/
 │       └── env_setup.py             # Подготовка окружения и переменных
 │   ├── node/
-│       └── package.json             #
-│   ├── templates/                   # Шаблоны для генерации конфигов и env
-│       ├── env.example.tpl
+│       └── package.json    
+│   ├── parser/                      # Парсеры: веб, YouTube, X (Nitter/скрейпер), и т.д.
+│       ├── browser_fetch.js         # Вызовы Playwright из node (headless fetch)
+│       ├── link_aggregator.py       # Слияние/чистка ссылок, эвристики
+│       ├── twitter_scraper.js       # JS-скрейпер X (fallback)
+│       ├── twitter.py               # Добыча ссылок/метаданных из X (через Nitter/скрейпер)
+│       ├── web.py                   # Парсер сайтов (главная/документация/соц-иконки)
+│       └── youtube.py               # Извлечение каналов/ссылок YouTube         
+│   ├── templates/                   # Шаблоны для генерации примеров конфигов и env
 │       ├── .env.stub.tpl
+│       ├── main_template.json
 │       ├── settings.example.yml
-│       └── settings.yml.tpl
-│   ├── console.py                   # 
+│       └── settings.example.yml.tpl
+│   ├── collector.py                 # Сбор соц-ссылок/метаданных (агрегация результатов парсеров)
+│   ├── console.py                   # Единый формат терминальных меток: [ok]/[skip]/[add]/...
 │   ├── install.py                   # Автоустановка зависимостей
 │   ├── log_setup.py                 # Централизованное логирование
-│   ├── orchestrator.py              # Оркестратор
-│   ├── paths.py                     # Пути и директории проекта
-│   └── settings.py                  # Загрузчик и валидатор конфигурации
+│   ├── normalize.py                 # Нормализация брендов/доменов (для логов и storage)
+│   ├── orchestrator.py              # Оркестратор пайплайнов research/enrich (консоль+файловый лог)
+│   ├── paths.py                     # Все пути проекта (storage/logs/config и т.п.)
+│   └── settings.py                  # Чтение settings.yml и вспомогательные флаги/образы
 │
 ├── db/                              # Заглушка под миграции и SQL (если потребуется)
 │
 ├── docker/                          # Docker-инфраструктура
-│   ├── docker-compose.override.yml  #
-│   ├── docker-compose.yml           # Основной docker-compose (API, worker, db, redis)
-│   └── Dockerfile                   # Сборка образа приложения
+│   ├── docker-compose.override.yml  # Локальные оверрайды (порты/volume/режимы)
+│   ├── docker-compose.yml           # Основной стек: api/worker/beat/db/redis/job
+│   └── Dockerfile                   # Образ приложения (многостейдж)
 │
 ├── domain/                          # Бизнес-логика (services layer)
 │   └── services/
@@ -111,6 +120,7 @@ zen-crm-bot/
 │       ├── company_x.py             # Работа с X
 │       ├── dedupe.py                # Дедупликация контактов и компаний
 │       ├── dispatch.py              # Отправка сообщений в каналы
+│       ├── enrich.py                # Алгоритм обогащения компании по URL
 │       ├── ingest.py                # Парсинг сайтов и сбор информации
 │       ├── intake.py                # Bootstrap лида: enrichment + перевод стадий
 │       ├── plan.py                  # Построение плана аутрича (order каналов)
@@ -122,39 +132,33 @@ zen-crm-bot/
 │   └── templating/
 │       └── jinja.py                 # Рендеринг HTML-писем через Jinja2
 │
-├── logs/                            # Логи всех компонентов
-│   ├── api.log                      # API FastAPI
-│   ├── worker.log                   # Celery worker
-│   ├── beat.log                     # Celery beat
-│   ├── email.log                    # Отправка писем
-│   ├── discord.log                  # Outreach через Discord
-│   ├── telegram.log                 # Outreach через Telegram
-│   ├── docker.log                   # Docker-скрипты
-│   ├── host.log                     # Общий хостовой лог
-│   └── zen-crm.log                  # Главный лог сервиса
+├── logs/                            # Логи (files rolling)
+│   ├── host.log                     # Общий лог (оркестратор, CLI-режимы и др.)
+│   ├── kommo.log                    # Трафик/события Kommo-адаптера
+│   └── setup.log                    # Подготовка окружения (start.py: проверка, build, up)
 │
-├── modules/                         # Модульная система плагинов аутрича
-│   ├── outreach/                    # Каналы коммуникации
-│       ├── discord.py
-│       ├── forms.py
-│       └── telegram.py
-│   ├── base.py                      # Базовый класс плагинов
-│   └── registry.py                  # Реестр модулей
+├── modules/                         # Плагины каналов аутрича
+│   ├── outreach/
+│   │   ├── discord.py               # Отправка в Discord (webhook)
+│   │   ├── forms.py                 # Заполнение контакт-форм
+│   │   └── telegram.py              # Отправка в Telegram
+│   ├── base.py                      # Базовый интерфейс плагина канала
+│   └── registry.py                  # Реестр и фабрика плагинов
 │
 ├── storage/                         # Временные и постоянные данные
 │   ├── celery/                      # Celery scheduler state
 │       ├── celerybeat-schedule
 │       └── ...
+│   ├── projects/                    # Кешированные профили проектов (по доменам)
+        └── ...
 │   └── seed/
 │       └── state.json               # Индекс текущего seed-компании
 │
 ├── worker/                          # Фоновые задачи
 │   └── tasks.py                     # Celery-таски (seed\_next\_company, kickoff\_outreach и др.)
 │
-├── .dockerignore                    # Docker-игнор
 ├── .env                             # Локальные переменные окружения
 ├── .env.example                     # Шаблон для .env
-├── .gitignore                       # Git-игнор
 ├── README.md                        # Документация (EN)
 ├── README.ru.md                     # Документация (RU)
 ├── requirements.txt                 # Python зависимости

@@ -6,6 +6,7 @@ config/settings.yml
 core/node/node_modules/
 core/node/.ms-playwright/
 core/templates/settings.example.yml
+core/node/package-lock.json
 
 logs/
 note.txt
