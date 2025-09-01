@@ -3,11 +3,17 @@
 env/
 venv/
 config/settings.yml
+core/node/node_modules/
+core/node/.ms-playwright/
+core/templates/settings.example.yml
 
 logs/
+note.txt
 !logs/.gitkeep
 storage/celery/
 storage/seed/state.json
 
+domain/__init__.py
+domain/services/__init__.py
 __pycache__/
 *.pyc

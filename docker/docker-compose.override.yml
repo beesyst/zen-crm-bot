@@ -3,9 +3,16 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       - ../:/app
+      - ../logs:/app/logs
   worker:
     volumes:
       - ../:/app
+      - ../logs:/app/logs
   beat:
     volumes:
       - ../:/app
+      - ../logs:/app/logs
+  job:
+    volumes:
+      - ../:/app
+      - ../logs:/app/logs

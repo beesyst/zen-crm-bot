@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import logging
 import os
 from pathlib import Path
 from typing import Any, Dict
 
 import yaml
-from core.log_setup import get_request_id, request_id_var, setup_logging
+from core.log_setup import get_logger, get_request_id, request_id_var, setup_logging
 from core.paths import ensure_dirs
 from fastapi import FastAPI, Request
 
@@ -15,7 +14,7 @@ ensure_dirs()
 
 # Единая настройка логирования (без .env)
 setup_logging(level="INFO", service="zen-crm", env="dev", write_files=True)
-log = logging.getLogger("app.api")
+log = get_logger("host")
 
 
 # Ленивая загрузка конфигурации YAML по SETTINGS_PATH (или config/settings.yml)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -9,95 +10,45 @@ import time
 from pathlib import Path
 from textwrap import dedent
 
+import yaml
+
+# Корень проекта в sys.path для локальных импортов
 PROJECT_ROOT_FALLBACK = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT_FALLBACK) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT_FALLBACK))
 
+# Локальные импорты инфраструктуры
 from core.log_setup import clear_all_logs, get_logger
-from core.paths import LOG_PATHS, ensure_dirs
+from core.paths import (
+    LOG_PATHS,
+    NODE_DIR,
+    NODE_LOCK,
+    NODE_PKG,
+    PLAYWRIGHT_CACHE,
+    ensure_dirs,
+)
 from core.paths import PROJECT_ROOT as ROOT
 from core.settings import get_flag, get_image
+from core.tpl import generate_settings_example, sync_env_from_settings
+
+# Переменные окружения для playwright/node
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(PLAYWRIGHT_CACHE)
+os.environ["NODE_PATH"] = str(NODE_DIR / "node_modules")
 
 SETUP_LOGGER = get_logger("setup")
+HOST_LOGGER = get_logger("host")
 
 # Пути и константы
 DOCKER_DIR = ROOT / "docker"
 ENV_FILE = ROOT / ".env"
 ENV_EXAMPLE = ROOT / ".env.example"
 ENV_TPL_FILE = ROOT / "core" / "templates" / ".env.stub.tpl"
-LOG_FILE = LOG_PATHS["setup"]
 
 # Кадры спиннера
 _SPIN = ["|", "/", "-", "\\"]
 
 
-# Из settings.yml
-def _export_compose_env():
-    os.environ["POSTGRES_IMAGE"] = get_image("postgres")
-    os.environ["REDIS_IMAGE"] = get_image("redis")
-
-
-# Стрим вывода в терминал (для коротких команд типа curl/logs)
-def sh_stream(cmd: list[str], cwd: Path | None = None) -> int:
-    print(f"$ {' '.join(cmd)}")
-    return subprocess.call(cmd, cwd=str(cwd) if cwd else None)
-
-
-# Запись stdout/stderr в logs/setup.log (без вывода в терминал)
-def sh_log(cmd: list[str], cwd: Path | None = None) -> int:
-    ensure_dirs()
-    SETUP_LOGGER.info("$ %s", " ".join(cmd))
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(cwd) if cwd else None,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
-    for line in proc.stdout or []:
-        line = line.rstrip("\n")
-        if line:
-            SETUP_LOGGER.info(line)
-    proc.wait()
-    rc = proc.returncode
-    if rc != 0:
-        SETUP_LOGGER.error("exit code: %s", rc)
-    return rc
-
-
-# Выполнить команду, получить (rc, stdout_text) и продублировать вывод в setup.log
-def run_and_capture(cmd: list[str], cwd: Path | None = None) -> tuple[int, str]:
-    ensure_dirs()
-    SETUP_LOGGER.info("$ %s", " ".join(cmd))
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(cwd) if cwd else None,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-    except FileNotFoundError:
-        msg = f"command not found: {cmd[0]}"
-        SETUP_LOGGER.error(msg)
-        return 127, msg
-
-    lines: list[str] = []
-    for line in proc.stdout or []:
-        line = line.rstrip("\n")
-        if line:
-            lines.append(line)
-            SETUP_LOGGER.info(line)
-    proc.wait()
-    rc = proc.returncode
-    if rc != 0:
-        SETUP_LOGGER.error("exit code: %s", rc)
-    return rc, "\n".join(lines).strip()
-
-
-# Визуализация статуса (спиннер)
+# Спиннер: красивая анимация выполнения шага + возврат ok/err
 def spinner_run(label: str, worker: callable) -> bool:
     done = threading.Event()
     state = {"ok": False, "label": label, "suffix": ""}
@@ -128,16 +79,171 @@ def spinner_run(label: str, worker: callable) -> bool:
     return state["ok"]
 
 
-# Короткие хелперы статусов (без спиннера)
+# Хелпер: короткие статусы без спиннера
 def step_ok(text: str):
     print(f"[ok] {text}")
 
 
+# Хелпер
 def step_error(text: str):
     print(f"[error] {text}")
 
 
-# Проверки наличия обязательных файлов
+# Shell: выполнение команды, стрим вывода в терминал
+def sh_stream(cmd: list[str], cwd: Path | None = None) -> int:
+    print(f"$ {' '.join(cmd)}")
+    return subprocess.call(cmd, cwd=str(cwd) if cwd else None)
+
+
+# Shell: выполнение команды и запись stdout/stderr в logs/setup.log
+def sh_log_setup(cmd: list[str], cwd: Path | None = None) -> int:
+    ensure_dirs()
+    SETUP_LOGGER.info("$ %s", " ".join(cmd))
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    for line in proc.stdout or []:
+        line = line.rstrip("\n")
+        if line:
+            SETUP_LOGGER.info(line)
+    proc.wait()
+    rc = proc.returncode
+    if rc != 0:
+        SETUP_LOGGER.error("exit code: %s", rc)
+    return rc
+
+
+# Shell: выполнение команды и запись stdout/stderr в logs/host.log
+def sh_log_host(cmd: list[str], cwd: Path | None = None, echo: bool = False) -> int:
+    ensure_dirs()
+    HOST_LOGGER.info("$ %s", " ".join(cmd))
+
+    # паттерны
+    ts_log_re = re.compile(
+        r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[[A-Z]+\] - \[[^\]]+\] "
+    )
+    console_marker_re = re.compile(r"^\[(skip|add|update|ok|error)\b", re.IGNORECASE)
+    plain_marker_re = re.compile(r"^(Start|Finish)$")
+    compose_runtime_re = re.compile(
+        r"^ ?Container .*  (Running|Started|Starting|Created|Recreated|Healthy|Built)$"
+    )
+
+    host_log_path = Path(LOG_PATHS["host"]).resolve()
+
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    with open(host_log_path, "a", encoding="utf-8") as host_log_file:
+        for line in proc.stdout or []:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+
+            # уже отформатированные (с таймстампом и [name]) → только в host.log
+            if ts_log_re.match(line):
+                host_log_file.write(line + "\n")
+                host_log_file.flush()
+                continue
+
+            # "Start"/"Finish" и сообщения docker compose о контейнерах → игнор в терминале
+            if plain_marker_re.match(line) or compose_runtime_re.match(line):
+                host_log_file.write(line + "\n")
+                host_log_file.flush()
+                continue
+
+            # короткие статусы [ok]/[skip]/[add]/[update]/[error] → в терминал (логгером не дублируем)
+            if console_marker_re.match(line):
+                if echo:
+                    print(line)
+                continue
+
+            # все остальное → host.log (+ терминал при echo=True)
+            host_log_file.write(line + "\n")
+            host_log_file.flush()
+            if echo:
+                print(line)
+
+    proc.wait()
+    rc = proc.returncode
+    if rc != 0:
+        HOST_LOGGER.error("exit code: %s", rc)
+    return rc
+
+
+# Shell: выполнение команды и возврат (rc, stdout_text), лог в setup.log
+def run_and_capture(cmd: list[str], cwd: Path | None = None) -> tuple[int, str]:
+    ensure_dirs()
+    SETUP_LOGGER.info("$ %s", " ".join(cmd))
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+    except FileNotFoundError:
+        msg = f"command not found: {cmd[0]}"
+        SETUP_LOGGER.error(msg)
+        return 127, msg
+
+    lines: list[str] = []
+    for line in proc.stdout or []:
+        line = line.rstrip("\n")
+        if line:
+            lines.append(line)
+            SETUP_LOGGER.info(line)
+    proc.wait()
+    rc = proc.returncode
+    if rc != 0:
+        SETUP_LOGGER.error("exit code: %s", rc)
+    return rc, "\n".join(lines).strip()
+
+
+# Сервис: загрузка config/settings.yml (для чтения режимов и т.п.)
+def _load_settings() -> dict:
+    p = ROOT / "config" / "settings.yml"
+    return yaml.safe_load(p.read_text(encoding="utf-8")) if p.exists() else {}
+
+
+# Сервис: постройка команды docker compose с корректным набором файлов
+def compose_cmd(*args: str) -> list[str]:
+    files = [DOCKER_DIR / "docker-compose.yml"]
+    override = DOCKER_DIR / "docker-compose.override.yml"
+    if override.exists():
+        files.append(override)
+    return [
+        "docker",
+        "compose",
+        "--env-file",
+        str(ROOT / ".env"),
+        *[arg for f in files for arg in ("-f", str(f))],
+        *args,
+    ]
+
+
+# Сервис: форматирование суффикса версии/баннера из stdout
+def _suffix(out: str, expected_prefix: str) -> str:
+    low = out.strip()
+    pref = expected_prefix.strip() + " "
+    if low.lower().startswith(pref.lower()):
+        return low[len(pref) :].strip()
+    return low
+
+
+# Подготовка: проверка наличия критичных файлов (requirements и т.д.)
 def check_required_files():
     req = ROOT / "requirements.txt"
     if not req.exists():
@@ -145,12 +251,12 @@ def check_required_files():
         sys.exit(1)
 
 
-# Подготовка базовых файлов
+# Подготовка: создание базовых файлов (.env.example, .env) и проверка конфигов
 def ensure_files():
     ensure_dirs()
     DOCKER_DIR.mkdir(parents=True, exist_ok=True)
 
-    # .env.example из core/templates/env.example.tpl
+    # .env.example из core/templates/.env.stub.tpl
     def _env_example():
         SETUP_LOGGER.info(".env.example path: %s", ENV_EXAMPLE)
         SETUP_LOGGER.info("template path:     %s", ENV_TPL_FILE)
@@ -159,7 +265,7 @@ def ensure_files():
         if ENV_TPL_FILE.exists():
             try:
                 shutil.copyfile(ENV_TPL_FILE, ENV_EXAMPLE)
-                return True, "created from core/templates/env.example.tpl"
+                return True, "created from core/templates/.env.stub.tpl"
             except Exception as e:
                 run_and_capture(
                     ["/bin/sh", "-c", f"echo 'copy .env.example failed: {e}' 1>&2"]
@@ -169,7 +275,7 @@ def ensure_files():
 
     spinner_run(".env.example", _env_example)
 
-    # .env (копия .env.example)
+    # .env (копия .env.example), дальше sync_env_from_settings() допишет нужные пары
     def _env():
         SETUP_LOGGER.info(".env path: %s", ENV_FILE)
         if ENV_FILE.exists():
@@ -183,7 +289,7 @@ def ensure_files():
 
     spinner_run(".env", _env)
 
-    # проверка config/settings.yml
+    # проверка наличия config/settings.yml
     def _settings():
         settings_yml = ROOT / "config" / "settings.yml"
         if settings_yml.exists():
@@ -192,7 +298,7 @@ def ensure_files():
 
     spinner_run("config/settings.yml", _settings)
 
-    # проверка docker-compose файлов
+    # проверка compose-файлов
     def _compose_files():
         base = DOCKER_DIR / "docker-compose.yml"
         override = DOCKER_DIR / "docker-compose.override.yml"
@@ -202,12 +308,66 @@ def ensure_files():
     spinner_run("docker-compose files", _compose_files)
 
 
-# Принудительная регенерация compose
-def regen_compose():
-    print("[skip] compose templates managed in repo — nothing to regenerate")
+# Подготовка: очистка логов один раз, если включено в settings.yml
+def _maybe_clear_logs_once():
+    if get_flag("clear_logs", False):
+        ensure_dirs()
+        clear_all_logs()
 
 
-# Проверка Docker / Compose / Postgres (с версиями)
+# Подготовка: установка node/npm и playwright браузера в кеш проекта
+def ensure_node_deps():
+    if not NODE_PKG.exists():
+        return True, "no core/node/package.json — skip"
+
+    # node --version
+    rc, out = run_and_capture(["node", "--version"])
+    if rc != 0:
+        return False, "node not available"
+
+    # npm --version
+    rc, out = run_and_capture(["npm", "--version"])
+    if rc != 0:
+        return False, "npm not available"
+
+    # npm ci / install
+    if NODE_LOCK.exists():
+        rc, _ = run_and_capture(["npm", "ci"], cwd=NODE_DIR)
+    else:
+        rc, _ = run_and_capture(["npm", "install", "--no-fund"], cwd=NODE_DIR)
+    if rc != 0:
+        return False, "npm install failed"
+
+    # playwright browsers → .ms-playwright
+    env = dict(os.environ)
+    env["PLAYWRIGHT_BROWSERS_PATH"] = str(PLAYWRIGHT_CACHE)
+    rc, _ = run_and_capture(
+        ["npm", "run", "playwright:install", "--silent"],
+        cwd=NODE_DIR,
+    )
+    if rc != 0:
+        # fallback: прямой вызов
+        rc, _ = run_and_capture(
+            ["npx", "playwright", "install", "chromium"],
+            cwd=NODE_DIR,
+        )
+        if rc != 0:
+            return False, "playwright install failed"
+
+    # экспорт путей в окружение текущего процесса
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(PLAYWRIGHT_CACHE)
+    node_modules_path = NODE_DIR / "node_modules"
+    os.environ["NODE_PATH"] = str(node_modules_path)
+    return True, ""
+
+
+# Подготовка: экспорт значений образов в окружение процесса для compose-вызовов
+def _export_compose_env():
+    os.environ["POSTGRES_IMAGE"] = get_image("postgres")
+    os.environ["REDIS_IMAGE"] = get_image("redis")
+
+
+# Проверка: docker / compose / (опц.) postgres-образа из settings.yml
 def check_prereqs(require_postgres: bool = True):
     ok = True
 
@@ -229,6 +389,7 @@ def check_prereqs(require_postgres: bool = True):
     if require_postgres:
 
         def _postgres():
+            # берем образ из settings.yml (через core.settings.get_image)
             pg_image = get_image("postgres")
             rc, out = run_and_capture(
                 ["docker", "run", "--rm", "--pull=missing", pg_image, "postgres", "-V"]
@@ -245,98 +406,136 @@ def check_prereqs(require_postgres: bool = True):
         sys.exit(1)
 
 
-def _suffix(out: str, expected_prefix: str) -> str:
-    low = out.strip()
-    pref = expected_prefix.strip() + " "
-    if low.lower().startswith(pref.lower()):
-        return low[len(pref) :].strip()
-    return low
+# Режимы: после успешного up - условный запуск research/enrich CLI
+def _run_modes_after_up():
+    settings = _load_settings()
+
+    # research (режим 1)
+    if settings.get("modes", {}).get("research_and_intake", {}).get("enabled", False):
+        HOST_LOGGER.info("[start] compose run cli.research")
+        sh_log_host(
+            compose_cmd("run", "--rm", "job", "python", "-m", "cli.research"),
+            cwd=DOCKER_DIR,
+            echo=True,
+        )
+
+    # enrich (режим 2)
+    if settings.get("modes", {}).get("enrich_existing", {}).get("enabled", False):
+        HOST_LOGGER.info("[start] compose run cli.enrich")
+        sh_log_host(
+            compose_cmd("run", "--rm", "job", "python", "-m", "cli.enrich"),
+            cwd=DOCKER_DIR,
+            echo=True,
+        )
 
 
-# Сборка команды docker compose
-def compose_cmd(*args: str) -> list[str]:
-    files = [DOCKER_DIR / "docker-compose.yml"]
-    override = DOCKER_DIR / "docker-compose.override.yml"
-    if override.exists():
-        files.append(override)
-
-    return [
-        "docker",
-        "compose",
-        *[arg for f in files for arg in ("-f", str(f))],
-        *args,
-    ]
-
-
-def _maybe_clear_logs_once():
-    if get_flag("clear_logs", False):
-        ensure_dirs()
-        clear_all_logs()
-
-
-# Команды запуска/остановки
+# Команда: локальный запуск в форграунде (build + up)
 def cmd_dev():
     print("Start")
     check_required_files()
-    ensure_files()
     _maybe_clear_logs_once()
+    ensure_files()
+    spinner_run("Node deps (npm + playwright)", ensure_node_deps)
+
+    # значения для docker compose в окружение процесса
     _export_compose_env()
+    # синхронизация .env из settings.yml (чтобы ручной compose тоже работал)
+    sync_env_from_settings()
+    # рендер settings.example.yml (редактированные секреты)
+    generate_settings_example()
+
     check_prereqs()
-    rc = sh_log(compose_cmd("up", "--build"), cwd=DOCKER_DIR)
+    rc = sh_log_setup(compose_cmd("up", "--build"), cwd=DOCKER_DIR)
     print("Finish" if rc == 0 else "Finish (with errors — see logs/setup.log)")
     sys.exit(rc)
 
 
-# Запуск стека в фоне (build + up -d) с прогрессом и Start/Finish.
+# Команада: локальный запуск в фоне (build + up -d)
 def cmd_dev_bg():
     print("Start")
     check_required_files()
-    ensure_files()
     _maybe_clear_logs_once()
+    ensure_files()
+    spinner_run("Node deps (npm + playwright)", ensure_node_deps)
+
     _export_compose_env()
+    sync_env_from_settings()
+    generate_settings_example()
     check_prereqs()
 
     def _up():
-        rc = sh_log(compose_cmd("up", "-d", "--build"), cwd=DOCKER_DIR)
+        rc = sh_log_setup(compose_cmd("up", "-d", "--build"), cwd=DOCKER_DIR)
         return (rc == 0), ""
 
     if not spinner_run("docker compose up (detached)", _up):
         step_error("compose up failed")
         sys.exit(1)
 
+    _run_modes_after_up()
     print("Finish")
     sys.exit(0)
 
 
-# Продовый запуск в фоне (build + up -d) с прогрессом и Start/Finish
+# Команада: продовый запуск в фоне (build + up -d)
 def cmd_prod_up():
     print("Start")
     check_required_files()
-    ensure_files()
     _maybe_clear_logs_once()
+    ensure_files()
+    spinner_run("Node deps (npm + playwright)", ensure_node_deps)
+
     _export_compose_env()
+    sync_env_from_settings()
+    generate_settings_example()
     check_prereqs()
 
     def _up_bg():
-        rc = sh_log(compose_cmd("up", "-d", "--build"), cwd=DOCKER_DIR)
+        rc = sh_log_setup(compose_cmd("up", "-d", "--build"), cwd=DOCKER_DIR)
         return (rc == 0), ""
 
     if not spinner_run("docker compose up (detached)", _up_bg):
         step_error("compose up failed")
         sys.exit(1)
 
+    _run_modes_after_up()
     print("Finish")
     sys.exit(0)
 
 
-# Продовое выключение сервиса (compose down) с прогрессом и Start/Finish
+# Команада: разовый запуск research CLI внутри job-контейнера
+def cmd_run_research():
+    _export_compose_env()
+    check_prereqs(require_postgres=False)
+    sys.exit(
+        sh_log_host(
+            compose_cmd("run", "--rm", "job", "python", "-m", "cli.research"),
+            cwd=DOCKER_DIR,
+            echo=True,
+        )
+    )
+
+
+# Команада: разовый запуск enrich CLI внутри job-контейнера
+def cmd_run_enrich():
+    _export_compose_env()
+    check_prereqs(require_postgres=False)
+    sys.exit(
+        sh_log_host(
+            compose_cmd("run", "--rm", "job", "python", "-m", "cli.enrich"),
+            cwd=DOCKER_DIR,
+            echo=True,
+        )
+    )
+
+
+# Команада: продовое выключение стека (down)
 def cmd_prod_down():
     print("Start")
     _export_compose_env()
     check_prereqs(require_postgres=False)
 
     def _down():
-        rc = sh_log(compose_cmd("down"), cwd=DOCKER_DIR)
+        rc = sh_log_setup(compose_cmd("down"), cwd=DOCKER_DIR)
         return (rc == 0), ""
 
     if not spinner_run("docker compose down", _down):
@@ -346,26 +545,26 @@ def cmd_prod_down():
     sys.exit(0)
 
 
-# Локальная остановка сервиса (compose down) с записью в setup.log
+# Команада: локальная остановка стека (down)
 def cmd_stop():
     _export_compose_env()
-    rc = sh_log(compose_cmd("down"), cwd=DOCKER_DIR)
+    rc = sh_log_setup(compose_cmd("down"), cwd=DOCKER_DIR)
     sys.exit(rc)
 
 
-# Текущие логи docker compose (tail -f) - стрим в терминал
+# Команада: текущие логи всех сервисов (tail -f)
 def cmd_logs():
     _export_compose_env()
     check_prereqs(require_postgres=False)
     sys.exit(sh_stream(compose_cmd("logs", "-f", "--tail=200"), cwd=DOCKER_DIR))
 
 
-# Проверка /health локального API - вывод в терминал
+# Команада: проверка локального API по /health
 def cmd_health():
     sys.exit(sh_stream(["curl", "-sS", "http://localhost:8000/health"]))
 
 
-# Отправка тестового вебхука Kommo - вывод в терминал (короткая команда)
+# Команада: отправка тестового вебхука Kommo
 def cmd_test_webhook():
     payload = '{"lead_id":12345,"stage":"READY_FOR_OUTREACH","fields":{"name":"Demo","website":"https://example.org"}}'
     sys.exit(
@@ -385,13 +584,14 @@ def cmd_test_webhook():
     )
 
 
+# Команада: очистка dangling-образов и build-кеша
 def cmd_prune():
     run_and_capture(["docker", "image", "prune", "-f"])
     rc, _ = run_and_capture(["docker", "builder", "prune", "-f"])
     sys.exit(rc)
 
 
-# Справка по командам
+# Команада: печать справки и выход
 def help_and_exit():
     print(
         dedent(
@@ -409,16 +609,20 @@ def help_and_exit():
           prod-down       — остановка на сервере
           regen-compose   — (no-op) шаблоны управляются в репозитории
           prune           — очистить dangling-образы и build-кеш
+          run-research    — одноразовый запуск режима 1 (research)
+          run-enrich      — одноразовый запуск режима 2 (enrich)
 
         Требуется существующий файл:
           requirements.txt — единственный источник зависимостей
+
+        Примечание: dev-bg / prod-up после поднятия стека автоматически запускают включенные в config/settings.yml режимы (research/enrich).
     """
         )
     )
     sys.exit(0)
 
 
-# Разбор аргумента команды и диспетчеризация
+# Entrypoint: диспетчер команд
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "dev-bg"
     if cmd == "dev":
@@ -438,7 +642,12 @@ def main():
     elif cmd == "prod-down":
         cmd_prod_down()
     elif cmd == "regen-compose":
-        regen_compose()
+        print("[skip] compose templates managed in repo - nothing to regenerate")
+        sys.exit(0)
+    elif cmd == "run-research":
+        cmd_run_research()
+    elif cmd == "run-enrich":
+        cmd_run_enrich()
     else:
         help_and_exit()
 

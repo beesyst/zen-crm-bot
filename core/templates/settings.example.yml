@@ -1,6 +1,14 @@
+clear_logs: true
+...
+
+images:
+  postgres: "postgres:17.6"
+  redis: "redis:8.2-alpine"
+
 app:
   host: "0.0.0.0"
   port: 8000
+...
 
 infra:
   redis_url: "redis://redis:6379/0"
@@ -9,19 +17,51 @@ infra:
 crm:
   provider: "kommo"
   kommo:
-    base_url: "https://YOUR-SUBDOMAIN.kommo.com"
-    access_token: "PASTE_TOKEN"
+    base_url: "https://beesyst.kommo.com/"
+    access_token: "PASTE_TOKEN"       # секрет редактируется
+    secret_key: "NJqKZvJrmCaTKswdaf6QaFUUgaAQB3NjlVp8pKCU49PKAwc1jx7fNv9eDdvg3uUa"
+    integration_id: "d4c70e79-632e-4fb5-a8c1-c4caa18e511d"
+    stages_map: "config/stages.map.json"
+    # Произвольные поля и режимы — тянем как есть, если юзер их добавил в settings.yml.
+    fields: {address: 195002, docs: 1048046, email: null, linkedin: 1047984, phone: null, reddit: 1047994,
+  telegram: 1047992, web: 787593, x: 954860, youtube: 1048044}
+    safe_mode:
+      dry_run: false
+...
+      no_overwrite: true
+...
+
+modes:
+  research_and_intake:
+    enabled: false
+...
+    tag_create: [bot, new]
+  enrich_existing:
+    enabled: true
+...
+    tag_process: [new]
+
+link_collections: [linktr.ee, link3.to, bio.link, beacons.ai, carrd.co, withkoji.com, taplink.cc, linkin.bio,
+  t.co]
 
 mail:
   smtp_host: "smtp.yourhost.com"
   smtp_port: 465
+...
   smtp_user: "mailer@yourhost.com"
-  smtp_pass: "secret"
+  smtp_pass: "secret"                 # секрет редактируется
   from_name: "Noders Outreach"
   from_email: "mailer@yourhost.com"
 
 channels:
   discord:
-    bot_token: "xxx"
+    webhook_fallback: ""
   telegram:
-    bot_token: "xxx"
+    bot_token: "xxx"                  # секрет редактируется
+
+outreach:
+  order: [email, discord, form, telegram]
+  quiet_hours:
+    start: "21:00"
+    end: "08:00"
+    timezone: "Europe/Moscow"

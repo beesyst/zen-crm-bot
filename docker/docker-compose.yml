@@ -11,6 +11,9 @@ services:
         condition: service_healthy
       db:
         condition: service_healthy
+    volumes:
+      - ../logs:/app/logs
+      - ../storage:/app/storage
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
@@ -30,6 +33,9 @@ services:
         condition: service_healthy
       db:
         condition: service_healthy
+    volumes:
+      - ../logs:/app/logs
+      - ../storage:/app/storage
     restart: unless-stopped
 
   beat:
@@ -48,6 +54,8 @@ services:
       db:
         condition: service_healthy
     volumes:
+      - ../logs:/app/logs
+      - ../storage:/app/storage
       - ../storage/celery:/app/storage/celery
     restart: unless-stopped
 
@@ -82,6 +90,21 @@ services:
       timeout: 5s
       retries: 10
     restart: unless-stopped
+
+  job:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: runtime
+    env_file: [../.env]
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    volumes:
+      - ../logs:/app/logs
+      - ../storage:/app/storage
 
 volumes:
   db_data:

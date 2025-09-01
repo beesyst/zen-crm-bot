@@ -1,0 +1,16 @@
+{
+  "name": "zen-crm-node",
+  "private": true,
+  "version": "1.0.0",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "postinstall": "PLAYWRIGHT_BROWSERS_PATH=.ms-playwright npx playwright install chromium",
+    "playwright:install": "PLAYWRIGHT_BROWSERS_PATH=.ms-playwright npx playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "1.54.0",
+    "fingerprint-injector": "2.1.70"
+  }
+}

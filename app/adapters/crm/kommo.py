@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import json
-import logging
 from pathlib import Path
 from typing import Any, Dict, List
 
 import requests
+from core.log_setup import get_logger
 from core.settings import get_settings
 
-log = logging.getLogger("crm.kommo")
+log = get_logger("kommo")
 
 
 def _conf():
@@ -52,7 +52,9 @@ class KommoAdapter:
     # http
     def _req(self, method: str, path: str, **kw) -> Any:
         url = f"{self.base}{path}"
+        log.info("HTTP %s %s", method, path)
         resp = requests.request(method, url, headers=self.headers, timeout=30, **kw)
+        log.info("HTTP %s %s -> %s", method, path, resp.status_code)
         if resp.status_code >= 400:
             # не падаем без логов: поможет диагностировать неправильные id полей/стадий
             body = resp.text[:500].replace("\n", " ")
@@ -136,6 +138,7 @@ class KommoAdapter:
         return int(companies[0]["id"])
 
     def update_company_custom_fields(self, company_id: int, kv: dict[int, Any]) -> None:
+        log.info("PATCH company %s custom_fields: %s", company_id, list(kv.keys()))
         if not kv:
             return
         cf = []
@@ -165,3 +168,80 @@ class KommoAdapter:
         return [
             t.get("name", "") for t in (company.get("_embedded", {}).get("tags") or [])
         ]
+
+    # постраничный обход компаний с вытаскиванием custom_fields и tags
+    def iter_companies(self, page_size: int = 250):
+        page = 1
+        while True:
+            params = {
+                "page": page,
+                "limit": page_size,
+                "with": "custom_fields,contacts",
+            }
+            data = self._req("GET", "/api/v4/companies", params=params) or {}
+            items = (data.get("_embedded") or {}).get("companies") or []
+            if not items:
+                break
+            # подтягиваем теги отдельным запросом
+            for it in items:
+                try:
+                    tags = (
+                        self._req("GET", f"/api/v4/companies/{it['id']}") or {}
+                    ).get("_embedded", {}).get("tags") or []
+                    it.setdefault("_embedded", {}).setdefault("tags", tags)
+                except Exception:
+                    pass
+                yield it
+            page += 1
+
+    # сайт компании из custom_fields / верхнего уровня
+    def get_company_web(self, company: Dict[str, Any]) -> str:
+        fields = (
+            company.get("custom_fields_values") or company.get("custom_fields") or []
+        )
+        # приоритет - явные поля web/site из настроек
+        web_fids = []
+        try:
+            if self.fields.get("web"):
+                web_fids.append(int(self.fields["web"]))
+            if self.fields.get("site"):
+                web_fids.append(int(self.fields["site"]))
+        except Exception:
+            pass
+
+        # сначала ищем по id
+        for f in fields:
+            fid = f.get("field_id")
+            if fid in web_fids:
+                for v in f.get("values") or []:
+                    val = (v.get("value") or "").strip()
+                    if val.startswith("http"):
+                        return val
+
+        # затем по названию/коду
+        for f in fields:
+            code = (f.get("code") or "").lower()
+            name = (f.get("name") or "").lower()
+            if code in ("website", "web", "url") or "site" in name or "web" in name:
+                for v in f.get("values") or []:
+                    val = (v.get("value") or "").strip()
+                    if val.startswith("http"):
+                        return val
+
+        # фолбэк - поле верхнего уровня
+        return (company.get("website") or "").strip()
+
+    # фильтрация компаний по тегам (на своей стороне)
+    def find_companies_by_tags(self, tags: list[str]) -> list[Dict[str, Any]]:
+        want = {t.strip().lower() for t in (tags or []) if t.strip()}
+        out: list[Dict[str, Any]] = []
+        for c in self.iter_companies():
+            tags_emb = (c.get("_embedded") or {}).get("tags") or []
+            got = {
+                (t.get("name") or "").strip().lower()
+                for t in tags_emb
+                if isinstance(t, dict)
+            }
+            if want & got:
+                out.append(c)
+        return out

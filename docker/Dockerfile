@@ -7,38 +7,73 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# Системные зависимости для Chromium (Playwright)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Устойчивый apt с повторами и очисткой кешей + nodejs/npm + либы для Chromium
+RUN set -eux; \
+  echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries; \
+  apt-get update; \
+  apt-get install -y --no-install-recommends \
     ca-certificates wget curl \
+    # nodejs/npm нужны для парсеров (X/Nitter и пр.)
+    nodejs npm \
+    # зависимости для Chromium/Playwright
     libnss3 libxss1 libasound2 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
     libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
     libgbm1 libglib2.0-0 libgtk-3-0 libpango-1.0-0 libcairo2 \
     libx11-6 libx11-xcb1 libxext6 libxshmfence1 \
-  && rm -rf /var/lib/apt/lists/*
+  || ( \
+    echo "APT failed once, cleaning caches and retrying..." >&2; \
+    apt-get clean; rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      ca-certificates wget curl \
+      nodejs npm \
+      libnss3 libxss1 libasound2 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
+      libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+      libgbm1 libglib2.0-0 libgtk-3-0 libpango-1.0-0 libcairo2 \
+      libx11-6 libx11-xcb1 libxext6 libxshmfence1 \
+  ); \
+  apt-get clean; \
+  rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb
 
 WORKDIR /app
 
-# deps stage: только зависимости (лучшее кеширование)
+# deps: Python + Playwright + Node deps (лучшее кеширование)
 FROM base AS deps
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
+# Python зависимости
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 RUN python -m playwright install chromium
 
-# runtime stage: минимальный слой с кодом
+# Node зависимости для локальных скриптов (core/node)
+WORKDIR /app/core/node
+COPY core/node/package.json core/node/package-lock.json* ./
+RUN if [ -f package-lock.json ]; then \
+      npm ci --omit=dev --no-audit --no-fund; \
+    else \
+      npm install --omit=dev --no-audit --no-fund; \
+    fi
+
+# runtime: минимальный слой с кодом
 FROM base AS runtime
-# Переносим питон-зависимости
+# Перенос Python deps и Playwright браузеры
 COPY --from=deps /usr/local /usr/local
-# Переносим браузеры Playwright из того же пути
 COPY --from=deps /ms-playwright /ms-playwright
-# И фиксируем переменную, чтобы рантайм смотрел туда же
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
-# Копирование проекта
+# Проектный код
+WORKDIR /app
 COPY . /app
 
-# безопасный пользователь
-RUN useradd -ms /bin/bash appuser && chown -R appuser:appuser /app /ms-playwright /usr/local
+# Перенос node_modules локальных скриптов
+COPY --from=deps /app/core/node/node_modules /app/core/node/node_modules
+# Важно: чтобы скрипты могли находить модули
+ENV NODE_PATH=/app/core/node/node_modules
+
+# Безопасный пользователь
+RUN useradd -ms /bin/bash appuser && \
+    chown -R appuser:appuser /app /ms-playwright /usr/local
 USER appuser
 
 # Целевые стадии под compose target'ы

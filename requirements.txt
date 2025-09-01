@@ -2,6 +2,8 @@ fastapi
 uvicorn[standard]
 pydantic
 requests
+beautifulsoup4
+lxml
 httpx
 jinja2
 celery
@@ -11,5 +13,5 @@ psycopg2-binary
 pyyaml
 python-dotenv
 python-json-logger
-playwright==1.54.0
 python-multipart==0.0.20
+playwright~=1.55.0

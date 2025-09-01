@@ -42,6 +42,8 @@
 ./start.sh test-webhook   # отправить тестовый вебхук Kommo
 ./start.sh prod-up        # собрать и запустить стек на сервере (docker compose -d)
 ./start.sh prod-down      # остановить стек на сервере
+./start.sh run-research   # одноразовый запуск режима 1 (research)
+./start.sh run-enrich     # одноразовый запуск режима 2 (enrich)
 ```
 
 ## Архитектура
@@ -61,14 +63,18 @@
 zen-crm-bot/
 ├── app/                             # Веб-приложение (FastAPI)
 │   ├── adapters/                    # Адаптеры для внешних систем
-│   │   └── crm/
-│   │       └── kommo.py             # Тонкий клиент Kommo API v4
+│       └── crm/
+│           └── kommo.py             # Тонкий клиент Kommo API v4
 │   ├── routes/                      # HTTP-маршруты API
-│   │   ├── admin.py                 # Админ-ручки (seed, add\_note, service endpoints)
-│   │   └── webhooks.py              # Вебхуки от Kommo (bootstrap, события CRM)
+│       ├── admin.py                 # Админ-ручки (seed, add\_note, service endpoints)
+│       └── webhooks.py              # Вебхуки от Kommo (bootstrap, события CRM)
 │   ├── templates/                   # Jinja/HTML шаблоны
-│   │   └── email\_outreach.html     # Шаблон писем для email-канала
+│       └── email_outreach.html      # Шаблон писем для email-канала
 │   └── main.py                      # Точка входа FastAPI (инициализация, роуты)
+│
+├── cli/                             # 
+│   ├── enrich.py                    # 
+│   └── research.py                  # 
 │
 ├── config/                          # Конфигурация системы
 │   ├── settings.yml                 # Главный конфиг (infra, crm, mail, channels, outreach)
@@ -77,22 +83,26 @@ zen-crm-bot/
 │
 ├── core/                            # Базовые утилиты и bootstrap
 │   ├── bootstrap/
-│   │   └── env\_setup.py            # Подготовка окружения и переменных
-│   ├── install.py                   # Автоустановка зависимостей
-│   ├── log\_setup.py                # Централизованное логирование
-│   ├── paths.py                     # Пути и директории проекта
-│   ├── settings.py                  # Загрузчик и валидатор конфигурации
-│   └── templates/                   # Шаблоны для генерации конфигов и env
+│       └── env_setup.py             # Подготовка окружения и переменных
+│   ├── node/
+│       └── package.json             #
+│   ├── templates/                   # Шаблоны для генерации конфигов и env
 │       ├── env.example.tpl
 │       ├── .env.stub.tpl
 │       ├── settings.example.yml
 │       └── settings.yml.tpl
+│   ├── console.py                   # 
+│   ├── install.py                   # Автоустановка зависимостей
+│   ├── log_setup.py                 # Централизованное логирование
+│   ├── orchestrator.py              # Оркестратор
+│   ├── paths.py                     # Пути и директории проекта
+│   └── settings.py                  # Загрузчик и валидатор конфигурации
 │
 ├── db/                              # Заглушка под миграции и SQL (если потребуется)
 │
 ├── docker/                          # Docker-инфраструктура
+│   ├── docker-compose.override.yml  #
 │   ├── docker-compose.yml           # Основной docker-compose (API, worker, db, redis)
-│   ├── docker-compose.override.yml
 │   └── Dockerfile                   # Сборка образа приложения
 │
 ├── domain/                          # Бизнес-логика (services layer)
@@ -108,7 +118,7 @@ zen-crm-bot/
 │
 ├── infra/                           # Интеграции низкого уровня
 │   ├── senders/
-│   │   └── email.py                 # Отправка писем (SMTP)
+│       └── email.py                 # Отправка писем (SMTP)
 │   └── templating/
 │       └── jinja.py                 # Рендеринг HTML-писем через Jinja2
 │
@@ -124,28 +134,27 @@ zen-crm-bot/
 │   └── zen-crm.log                  # Главный лог сервиса
 │
 ├── modules/                         # Модульная система плагинов аутрича
-│   ├── base.py                      # Базовый класс плагинов
-│   ├── registry.py                  # Реестр модулей
-│   └── outreach/                    # Каналы коммуникации
+│   ├── outreach/                    # Каналы коммуникации
 │       ├── discord.py
 │       ├── forms.py
 │       └── telegram.py
+│   ├── base.py                      # Базовый класс плагинов
+│   └── registry.py                  # Реестр модулей
 │
 ├── storage/                         # Временные и постоянные данные
 │   ├── celery/                      # Celery scheduler state
-│   │   ├── celerybeat-schedule
-│   │   └── ...
+│       ├── celerybeat-schedule
+│       └── ...
 │   └── seed/
 │       └── state.json               # Индекс текущего seed-компании
 │
 ├── worker/                          # Фоновые задачи
 │   └── tasks.py                     # Celery-таски (seed\_next\_company, kickoff\_outreach и др.)
 │
+├── .dockerignore                    # Docker-игнор
 ├── .env                             # Локальные переменные окружения
 ├── .env.example                     # Шаблон для .env
 ├── .gitignore                       # Git-игнор
-├── .dockerignore                    # Docker-игнор
-├── requirements.txt                 # Python зависимости
 ├── README.md                        # Документация (EN)
 ├── README.ru.md                     # Документация (RU)
 ├── requirements.txt                 # Python зависимости

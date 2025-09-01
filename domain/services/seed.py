@@ -6,6 +6,7 @@ import re
 from typing import Any, Dict, Optional, Tuple
 
 import yaml
+from app.adapters.crm.kommo import KommoAdapter
 
 STATE_PATH = "/app/storage/seed/state.json"
 
@@ -58,3 +59,29 @@ def mark_done():
     st = _load_state()
     st["next_idx"] = int(st.get("next_idx", 0)) + 1
     _save_state(st)
+
+
+def _brand_from_url(url: str) -> str:
+    host = url.split("//")[-1].split("/")[0].lower()
+    if host.startswith("www."):
+        host = host[4:]
+    core = host.split(".")[0]
+    return core.capitalize() if core else "Project"
+
+
+def seed_company_from_url(
+    crm: KommoAdapter, url: str, settings: Dict[str, Any]
+) -> bool:
+    url_norm = url.strip().rstrip("/")
+    for c in crm.iter_companies():
+        web = (crm.get_company_web(c) or "").strip().rstrip("/")
+        if web and web == url_norm:
+            return False
+    name = _brand_from_url(url)
+    tags = (
+        (settings.get("modes") or {})
+        .get("research_and_intake", {})
+        .get("tag_create", ["bot", "new"])
+    )
+    crm.create_company(name=name, website=url.strip(), tags=tags)
+    return True

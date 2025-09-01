@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import logging
 from typing import Any, Dict, List, Optional
 
 from celery import Celery, chain, chord, group
-from core.log_setup import bind_lead_id, bind_task_id, setup_logging
+from core.log_setup import bind_lead_id, bind_task_id, get_logger, setup_logging
 from core.paths import ensure_dirs
 from core.settings import get_settings
 
@@ -27,8 +26,15 @@ except Exception:
 
 # Папки/логи
 ensure_dirs()
-setup_logging(level="INFO", service="zen-crm", env="dev", write_files=True)
-log = logging.getLogger("worker")
+setup_logging(
+    level="INFO",
+    service="zen-crm",
+    env="dev",
+    write_files=True,
+    split_files=False,
+    all_in_one_file=False,
+)
+log = get_logger("worker")
 
 # Конфиг / Celery
 cfg = get_settings()
@@ -300,7 +306,6 @@ def seed_next_company() -> dict:
     try:
         item, idx, total = get_next_site()
         if not item:
-            log.info("seed.done", extra={"event": "seed.done"})
             return {"ok": True, "done": True, "idx": idx, "total": total}
 
         from app.adapters.crm.kommo import KommoAdapter

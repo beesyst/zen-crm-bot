@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import logging
-
 from app.adapters.crm.kommo import KommoAdapter
+from core.log_setup import get_logger
 from domain.services.company_x import set_company_x
 from fastapi import APIRouter, HTTPException, Query
 from worker.tasks import seed_next_company
 
-log = logging.getLogger("app.admin")
+log = get_logger("host")
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 

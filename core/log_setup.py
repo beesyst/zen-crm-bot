@@ -131,18 +131,26 @@ def setup_logging(
     root.addHandler(stream)
 
     if write_files:
-        # общий файл приложения
-        if all_in_one_file and "all" in LOG_PATHS:
+        path = LOG_PATHS.get("host")
+        if all_in_one_file and path:
             fh = RotatingFileHandler(
-                LOG_PATHS["all"],
-                maxBytes=max_bytes,
-                backupCount=backup_count,
-                encoding="utf-8",
+                path, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8"
             )
             fh.setFormatter(human_fmt)
             fh.addFilter(ctx_filter)
             fh.setLevel(root.level)
-            root.addHandler(fh)
+
+            for name in ("host", "orchestrator"):
+                lg = logging.getLogger(name)
+                lg.setLevel(root.level)
+                lg.propagate = False
+                already = any(
+                    isinstance(h, RotatingFileHandler)
+                    and getattr(h, "baseFilename", None) == fh.baseFilename
+                    for h in lg.handlers
+                )
+                if not already:
+                    lg.addHandler(fh)
 
         # отдельные файлы по именам логгеров (фракциям)
         if split_files:
@@ -159,11 +167,7 @@ def setup_logging(
                 h.setLevel(root.level)
                 logging.getLogger(logger_name).addHandler(h)
 
-            attach_file("app.api", "api")
-            attach_file("worker", "worker")
-            attach_file("infra.email", "email")
-            attach_file("infra.discord", "discord")
-            attach_file("infra.telegram", "telegram")
+            attach_file("crm.kommo", "kommo")
 
     # успокаиваем шумные логгеры
     logging.getLogger("uvicorn").setLevel(logging.INFO)

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-import logging
 from typing import Dict
 
-log = logging.getLogger("domain.dedupe")
+from core.log_setup import get_logger
+
+# Хост-лог
+log = get_logger("dedupe")
 
 
 # Простейший дедуп: удаление повторяющихся emails

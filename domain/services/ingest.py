@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import logging
 import re
 from typing import Dict, List, Optional
 
 import requests
+from core.log_setup import get_logger
 
-log = logging.getLogger("domain.ingest")
+log = get_logger("host")
 
 EMAIL_RE = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9\.-]+")
 DISCORD_RE = re.compile(

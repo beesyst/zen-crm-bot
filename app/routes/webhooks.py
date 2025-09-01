@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
-import logging
 from typing import Any, Dict, Optional, Sequence, Union
 
+from core.log_setup import get_logger
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from worker.tasks import enrich_company, kickoff_outreach
 
-log = logging.getLogger("app.api")
+log = get_logger("host")
 router = APIRouter(prefix="/webhooks/kommo", tags=["kommo-webhooks"])
 
 
@@ -158,8 +158,9 @@ async def kommo_lead_updated(req: Request):
         raise HTTPException(status_code=400, detail="Missing lead_id or fields")
 
     log.info(
-        "webhook.lead.updated",
-        extra={"lead_id": lead_id, "keys": list(payload.keys())},
+        "webhook.lead.updated: queued outreach (lead_id=%s, keys=%s)",
+        lead_id,
+        list(payload.keys()),
     )
     kickoff_outreach.delay(payload)
     return {"queued": True, "lead_id": lead_id}

@@ -4,22 +4,24 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = PROJECT_ROOT / "config"
 LOGS_DIR = PROJECT_ROOT / "logs"
 TEMPLATES_DIR = PROJECT_ROOT / "app" / "templates"
+CORE_TEMPLATES_DIR = PROJECT_ROOT / "core" / "templates"
 STORAGE_DIR = PROJECT_ROOT / "storage"
+STORAGE_PROJECTS = STORAGE_DIR / "projects"
+MAIN_TEMPLATE = CORE_TEMPLATES_DIR / "main_template.json"
+CELERY_DIR = STORAGE_DIR / "celery"
+NODE_DIR = PROJECT_ROOT / "core" / "node"
+NODE_PKG = NODE_DIR / "package.json"
+NODE_LOCK = NODE_DIR / "package-lock.json"
+PLAYWRIGHT_CACHE = NODE_DIR / ".ms-playwright"
 
 # Единое место - фракции логов
 LOG_PATHS = {
     "host": LOGS_DIR / "host.log",
-    "api": LOGS_DIR / "api.log",
-    "worker": LOGS_DIR / "worker.log",
-    "email": LOGS_DIR / "email.log",
-    "discord": LOGS_DIR / "discord.log",
-    "telegram": LOGS_DIR / "telegram.log",
-    "docker": LOGS_DIR / "docker.log",
     "setup": LOGS_DIR / "setup.log",
-    "all": LOGS_DIR / "zen-crm.log",
+    "kommo": LOGS_DIR / "kommo.log",
 }
 
 
 def ensure_dirs():
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    for p in (LOGS_DIR, STORAGE_DIR, CELERY_DIR, STORAGE_PROJECTS):
+        p.mkdir(parents=True, exist_ok=True)
