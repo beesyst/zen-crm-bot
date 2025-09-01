@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup
 from core.log_setup import get_logger
 from core.normalize import force_https
 
-logger = get_logger("parser.twitter")
+logger = get_logger("twitter")
 
 
 # Загрузка settings.yml (локально, без падений)

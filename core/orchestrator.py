@@ -10,7 +10,7 @@ from domain.services.enrich import enrich_company_by_url
 from domain.services.seed import seed_company_from_url
 
 # Терминальные метки
-from core.console import add, error, finish, ok, skip, start, update
+from core.console import add, error, finish, ok, skip, update
 
 # Единый файловый лог host.log
 from core.log_setup import get_logger
@@ -63,30 +63,35 @@ def run_research_pipeline(options: OrchestratorOptions | None = None) -> None:
     opts = options or OrchestratorOptions()
     settings = _load_settings()
 
+    # режим выключен - коротко в терминал, чисто в host.log
     if not (
         settings.get("modes", {}).get("research_and_intake", {}).get("enabled", False)
     ):
         skip("research", "disabled in settings.yml")
-        _log.info("[skip]  research (disabled in settings.yml)")
+        _log.info("research отключён в settings.yml")
         return
 
     sites = _load_sites()
-    start()
+
+    # старт пайплайна: явный режим в терминале
+    ok("start research")
+
     if not sites:
-        skip("research", "config/sites.yml is empty")
-        _log.info("[skip]  research (config/sites.yml is empty)")
+        # нет источников - фиксируем итог и выходим
+        ok("total: 0")
+        _log.info("research: 0 sites")
         finish()
         return
 
     sites = list(_take_limit(sites, opts.limit))
-    ok(f"research: {len(sites)} sites")
-    _log.info("[ok]     research: %s sites", len(sites))
+    processed_total = 0
 
-    # прокинем settings
+    # подключаем CRM адаптер
     crm = KommoAdapter()
 
     for url in sites:
         app = brand_from_url(url) or "project"
+        # технические шаги только в host.log
         _log.info("Создание main.json - %s - %s", app, url)
         _log.info("Сбор соц линков - %s - %s", app, url)
 
@@ -95,28 +100,39 @@ def run_research_pipeline(options: OrchestratorOptions | None = None) -> None:
             if opts.dry_run:
                 _ = seed_company_from_url(crm, url, settings)
                 secs = int(time.time() - t0)
+                # терминал
                 skip(url, f"dry-run ({secs}s)")
-                _log.info("[skip]   %s - %s (dry-run, %ss)", app, url, secs)
+                # host.log
+                _log.info("Пропуск %s (dry-run, %ss)", url, secs)
             else:
                 created = seed_company_from_url(crm, url, settings)
                 secs = int(time.time() - t0)
                 if created:
+                    processed_total += 1
+                    # терминал
                     add(url, secs)
-                    _log.info("[add]    %s - %s - %s sec", app, url, secs)
+                    # host.log
+                    _log.info("Добавлено %s - %s - %s sec", app, url, secs)
                 else:
+                    # терминал
                     skip(url, "already exists")
-                    _log.info("[skip]   %s - %s (already exists)", app, url)
+                    # host.log
+                    _log.info("Пропуск %s (уже есть)", url)
         except Exception as e:
+            # терминал
             error(url, str(e))
-            _log.error("[error]  %s - %s - %s", app, url, e)
+            # host.log
+            _log.error("Ошибка %s - %s - %s", app, url, e)
             if opts.stop_on_error:
                 break
 
         if opts.rate_limit_sec > 0:
             time.sleep(opts.rate_limit_sec)
 
+    # финальная сводка
+    ok(f"total: {processed_total}")
+    _log.info("research: %s sites", processed_total)
     finish()
-    _log.info("Готово (research)")
 
 
 # Пайплайн 2: Enrich Existing
@@ -124,68 +140,83 @@ def run_enrich_pipeline(options: OrchestratorOptions | None = None) -> None:
     opts = options or OrchestratorOptions()
     settings = _load_settings()
 
+    # режим выключен - коротко в терминал, чисто в host.log
     if not settings.get("modes", {}).get("enrich_existing", {}).get("enabled", False):
         skip("enrich", "disabled in settings.yml")
-        _log.info("[skip]  enrich (disabled in settings.yml)")
+        _log.info("enrich отключён в settings.yml")
         return
 
-    # передаем settings в адаптер, чтобы работали safe_mode/fields и т.д.
     crm = KommoAdapter()
     tags = settings["modes"]["enrich_existing"].get("tag_process", ["new"])
     companies = crm.find_companies_by_tags(tags)
 
-    start()
+    # старт пайплайна: только терминал
+    ok("start enrich")
+
     if not companies:
-        skip("enrich", f"no companies with tags {','.join(tags)}")
-        _log.info("[skip]  enrich (no companies with tags %s)", ",".join(tags))
+        # ничего не обогащаем: терминал + финальная строка в host.log без префиксов
+        ok("total: 0")
+        _log.info("enrich: 0 companies")
         finish()
         return
 
     companies = list(_take_limit(companies, opts.limit))
-    ok(f"enrich: {len(companies)} companies")
-    _log.info("[ok]     enrich: %s companies", len(companies))
+
+    processed_total = 0
 
     for c in companies:
         url = crm.get_company_web(c)
         cid = c.get("id")
 
         if not url:
+            # терминал
             skip(f"company:{cid}", "no web")
-            _log.info("[skip]   company:%s (no web)", cid)
+            # host.log
+            _log.info("Пропуск company:%s (нет сайта)", cid)
             continue
 
         app = (c.get("name") or "").strip() or brand_from_url(url) or "project"
+
+        # технические шаги в host.log
         _log.info("Создание main.json - %s - %s", app, url)
         _log.info("Сбор соц линков - %s - %s", app, url)
 
         t0 = time.time()
         try:
             if opts.dry_run:
-                # проверяем, что пайплайн отрабатывает без реального апдейта
                 _ = enrich_company_by_url(crm, c, url, settings)
                 secs = int(time.time() - t0)
+                # терминал
                 skip(url, f"dry-run ({secs}s)")
-                _log.info("[skip]   %s - %s (dry-run, %ss)", app, url, secs)
+                # host.log — без приставок
+                _log.info("Пропуск %s (dry-run, %ss)", url, secs)
             else:
                 changed = enrich_company_by_url(crm, c, url, settings)
                 secs = int(time.time() - t0)
                 if changed:
+                    processed_total += 1
+                    # терминал
                     update(url, secs)
-                    _log.info("[update] %s - %s - %s sec", app, url, secs)
+                    # host.log — без приставок
+                    _log.info("Обновлено %s - %s - %s sec", app, url, secs)
                 else:
+                    # терминал
                     skip(url, "no changes")
-                    _log.info("[skip]   %s - %s (no changes)", app, url)
+                    # host.log — без приставок
+                    _log.info("Пропуск %s (нет изменений)", url)
         except Exception as e:
             error(url, str(e))
-            _log.error("[error]  %s - %s - %s", app, url, e)
+            _log.error("Ошибка %s - %s - %s", app, url, e)
             if opts.stop_on_error:
                 break
 
         if opts.rate_limit_sec > 0:
             time.sleep(opts.rate_limit_sec)
 
+    # финальная сводка: терминал + чистая строка в host.log
+    ok(f"total: {processed_total}")
+    _log.info("enrich: %s companies", processed_total)
     finish()
-    _log.info("Готово (enrich)")
 
 
 # Комбайнер по настройкам

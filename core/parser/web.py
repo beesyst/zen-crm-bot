@@ -11,7 +11,7 @@ from bs4 import BeautifulSoup
 from core.log_setup import get_logger
 from core.normalize import clean_project_name, force_https, is_bad_name
 
-logger = get_logger("parser.web")
+logger = get_logger("web")
 
 # Кэши для экономии сетевых запросов
 _FETCHED_HTML_CACHE: dict[str, str] = {}

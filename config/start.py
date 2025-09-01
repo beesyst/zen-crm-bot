@@ -156,10 +156,14 @@ def sh_log_host(cmd: list[str], cwd: Path | None = None, echo: bool = False) -> 
                 host_log_file.flush()
                 continue
 
-            # "Start"/"Finish" и сообщения docker compose о контейнерах → игнор в терминале
-            if plain_marker_re.match(line) or compose_runtime_re.match(line):
-                host_log_file.write(line + "\n")
-                host_log_file.flush()
+            # "Start"/"Finish" - не пишем в host.log, но в терминале оставляем (если echo=True)
+            if plain_marker_re.match(line):
+                if echo:
+                    print(line)
+                continue
+
+            # служебные сообщения docker compose - полностью игнорируем (и в host.log, и в терминале)
+            if compose_runtime_re.match(line):
                 continue
 
             # короткие статусы [ok]/[skip]/[add]/[update]/[error] → в терминал (логгером не дублируем)
@@ -412,7 +416,7 @@ def _run_modes_after_up():
 
     # research (режим 1)
     if settings.get("modes", {}).get("research_and_intake", {}).get("enabled", False):
-        HOST_LOGGER.info("[start] compose run cli.research")
+        HOST_LOGGER.info("compose run cli.research")
         sh_log_host(
             compose_cmd("run", "--rm", "job", "python", "-m", "cli.research"),
             cwd=DOCKER_DIR,
@@ -421,7 +425,7 @@ def _run_modes_after_up():
 
     # enrich (режим 2)
     if settings.get("modes", {}).get("enrich_existing", {}).get("enabled", False):
-        HOST_LOGGER.info("[start] compose run cli.enrich")
+        HOST_LOGGER.info("compose run cli.enrich")
         sh_log_host(
             compose_cmd("run", "--rm", "job", "python", "-m", "cli.enrich"),
             cwd=DOCKER_DIR,
@@ -472,7 +476,6 @@ def cmd_dev_bg():
         sys.exit(1)
 
     _run_modes_after_up()
-    print("Finish")
     sys.exit(0)
 
 
