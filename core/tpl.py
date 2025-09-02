@@ -17,9 +17,11 @@ LOG = get_logger("setup")
 # Константы путей шаблонов/файлов
 TEMPLATES_DIR = ROOT / "core" / "templates"
 SETTINGS_PATH = ROOT / "config" / "settings.yml"
+PKG_JSON_OUT = ROOT / "core" / "node" / "package.json"
 
 SETTINGS_EXAMPLE_TPL = TEMPLATES_DIR / "settings.example.yml.tpl"
 SETTINGS_EXAMPLE_OUT = TEMPLATES_DIR / "settings.example.yml"
+PKG_JSON_TPL = TEMPLATES_DIR / "package.json.tpl"
 
 ENV_PATH = ROOT / ".env"
 
@@ -87,6 +89,22 @@ def _render_text(tpl_text: str, context: dict) -> str:
         return str(val)
 
     return TOKEN_RE.sub(repl, tpl_text)
+
+
+def render_node_package_json() -> None:
+    if not PKG_JSON_TPL.exists():
+        LOG.info("skip: %s not found", PKG_JSON_TPL)
+        return
+    settings = _load_settings()
+    tpl_text = PKG_JSON_TPL.read_text(encoding="utf-8")
+    try:
+        rendered = _render_text(tpl_text, settings)
+        PKG_JSON_OUT.parent.mkdir(parents=True, exist_ok=True)
+        PKG_JSON_OUT.write_text(rendered, encoding="utf-8")
+        LOG.info("rendered %s from %s", PKG_JSON_OUT, PKG_JSON_TPL)
+    except Exception as e:
+        LOG.error("render package.json failed: %s", e)
+        raise
 
 
 # Копия настроек и редактирование секретов заглушками
@@ -160,6 +178,11 @@ def _read_python_debian() -> str:
     return (s.get("runtime", {}) or {}).get("python_debian", "")
 
 
+def _read_node_version() -> str:
+    s = _load_settings()
+    return (s.get("runtime", {}) or {}).get("node_version", "")
+
+
 # Синхронизация .env с config/settings.yml для нужд docker-compose
 def sync_env_from_settings() -> None:
     try:
@@ -176,6 +199,13 @@ def sync_env_from_settings() -> None:
 
         _ensure_env_kv(ENV_PATH, "PYTHON_VERSION", py)
         _ensure_env_kv(ENV_PATH, "PYTHON_DEBIAN", deb)
+
+        node = _read_node_version()
+        if not node:
+            raise ValueError(
+                "runtime.node_version обязан быть задан в config/settings.yml"
+            )
+        _ensure_env_kv(ENV_PATH, "NODE_VERSION", node)
 
         LOG.info(".env synced from settings.yml")
     except Exception as e:

@@ -1,7 +1,10 @@
 const { chromium } = require('playwright');
+const { newInjectedContext } = require('fingerprint-injector');
 
+// Разрешенные режимы ожидания
 const WAIT_STATES = new Set(['load', 'domcontentloaded', 'networkidle', 'nowait']);
 
+// Парсинг аргументов CLI
 function parseArgs(argv) {
   const args = {};
   for (let i = 2; i < argv.length; i++) {
@@ -25,6 +28,41 @@ function parseArgs(argv) {
   return args;
 }
 
+// Простейший детектор антибот-страниц (Cloudflare/403/503 и т.п.) - для телеметрии
+async function detectAntiBot(page, response) {
+  try {
+    const server = response?.headers()?.server || '';
+    const status = typeof response?.status === 'function' ? response.status() : 0;
+
+    if (status === 403 || status === 503) {
+      return { detected: true, kind: String(status), server };
+    }
+    if (server && /cloudflare/i.test(server)) {
+      const html = await page.content();
+      const low = (html || '').slice(0, 50000).toLowerCase();
+      const needles = [
+        'verifying you are human',
+        'checking your browser',
+        'review the security',
+        'cf-challenge',
+        'cloudflare',
+        'attention required!',
+      ];
+      if (needles.some(n => low.includes(n))) {
+        return { detected: true, kind: 'cloudflare', server };
+      }
+    }
+  } catch {}
+  return { detected: false, kind: '', server: '' };
+}
+
+// Нормализация twitter → x.com
+function normalizeTwitter(u) {
+  try { return u.replace(/https?:\/\/(www\.)?twitter\.com/i, 'https://x.com'); }
+  catch { return u; }
+}
+
+// Основная функция: навигация, рендер и сбор данных
 async function browserFetch(opts) {
   const {
     url,
@@ -41,28 +79,40 @@ async function browserFetch(opts) {
   } = opts || {};
 
   if (!url) throw new Error('url is required');
+
   const waitUntil = WAIT_STATES.has(wait) ? (wait === 'nowait' ? null : wait) : 'domcontentloaded';
 
   const launchArgs = [
     '--no-sandbox',
     '--disable-dev-shm-usage',
     '--disable-gpu',
+    '--disable-blink-features=AutomationControlled',
   ];
 
-  // Лог консоли страницы
+  // аккумулируем логи консоли страницы (полезно для диагностики)
   const consoleLogs = [];
 
+  // один попытка-запуск браузера и сбор данных
   const attempt = async () => {
     const startedAt = Date.now();
     const browser = await chromium.launch({ headless: true, args: launchArgs });
     let context;
     let page;
     try {
-      context = await browser.newContext({
-        userAgent: ua || undefined,
-        javaScriptEnabled: js,
-        extraHTTPHeaders: headers,
-      });
+      // пытаемся создать инъектированный контекст с валидным fingerprint
+      try {
+        context = await newInjectedContext(browser, {});
+      } catch (e) {
+        // безопасный фолбэк на обычный контекст с адекватным UA/заголовками
+        context = await browser.newContext({
+          userAgent: ua || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          javaScriptEnabled: js,
+          ignoreHTTPSErrors: true,
+          bypassCSP: true,
+          viewport: { width: 1366, height: 768 },
+          extraHTTPHeaders: { ...headers, 'Accept-Language': 'en-US,en;q=0.9' },
+        });
+      }
 
       if (Array.isArray(cookies) && cookies.length) {
         try { await context.addCookies(cookies); } catch { /* ignore */ }
@@ -70,39 +120,111 @@ async function browserFetch(opts) {
 
       page = await context.newPage();
       page.on('console', (msg) => {
-        try {
-          consoleLogs.push({ type: msg.type(), text: msg.text() });
-        } catch { /* ignore */ }
+        try { consoleLogs.push({ type: msg.type(), text: msg.text() }); } catch {}
       });
 
-      const resp = await page.goto(url, {
-        waitUntil: waitUntil || undefined,
-        timeout,
-      });
-
-      if (waitUntil === null) {
-        // nowait: все равно чуть подождем, чтобы прогрузились редиректы/скрипты
-        await page.waitForTimeout(500);
+      // надежная навигация: несколько вариантов waitUntil + попытка дождаться networkidle
+      async function robustGoto(p, targetUrl) {
+        const tries = [
+          { waitUntil: waitUntil || 'domcontentloaded', timeout },
+          { waitUntil: 'load',                           timeout },
+          { waitUntil: 'commit',                         timeout },
+        ];
+        for (const opts of tries) {
+          try {
+            const r = await p.goto(targetUrl, opts);
+            try { await p.waitForLoadState('networkidle', { timeout: 12000 }); } catch {}
+            return r;
+          } catch (e) { /* пробуем следующий режим */ }
+        }
+        return null;
       }
 
-      // Опциональный скриншот
+      const resp = await robustGoto(page, url);
+
+      // небольшая пауза + доскроллить страницу - чтобы ленивые футеры точно смонтировались
+      try { await page.waitForTimeout(800); } catch {}
+      try {
+        await page.evaluate(async () => {
+          const delay = (ms) => new Promise(r => setTimeout(r, ms));
+          let last = 0;
+          for (let i = 0; i < 8; i++) {
+            window.scrollTo(0, document.body.scrollHeight);
+            await delay(250);
+            const y = window.scrollY;
+            if (Math.abs(y - last) < 10) break;
+            last = y;
+          }
+        });
+      } catch {}
+
+      // подождать явные селекторы, где часто лежат соц-ссылки (footer/contentinfo/social)
+      try {
+        await page.waitForSelector(
+          'footer a[href], [role="contentinfo"] a[href], [class*="social"] a[href]',
+          { timeout: 2500 }
+        );
+      } catch {}
+
+      // опциональный скриншот
       if (screenshot) {
-        await page.screenshot({ path: screenshot, fullPage: true });
+        try { await page.screenshot({ path: screenshot, fullPage: true }); } catch {}
       }
 
       const finalUrl = page.url();
-      const status = resp ? resp.status() : 0;
+      const status = resp ? (typeof resp.status === 'function' ? resp.status() : 0) : 0;
       const ok = status >= 200 && status < 400;
 
+      // сбор соц-ссылок прямо в браузере (абсолютные URL + список всех твиттер-ссылок)
+      const socials = await page.evaluate((base) => {
+        const rxTwitter = /twitter\.com|x\.com/i;
+        const patterns = {
+          twitterURL: rxTwitter,
+          discordURL: /discord\.gg|discord\.com/i,
+          telegramURL: /t\.me|telegram\.me/i,
+          youtubeURL: /youtube\.com|youtu\.be/i,
+          linkedinURL: /linkedin\.com|lnkd\.in/i,
+          redditURL: /reddit\.com/i,
+          mediumURL: /medium\.com/i,
+          githubURL: /github\.com/i,
+        };
+        const toAbs = (href) => {
+          try { return href.startsWith('http') ? href : new URL(href, base).href; }
+          catch { return href; }
+        };
+        const acc = Object.fromEntries(Object.keys(patterns).map(k => [k, '']));
+        const twitterAll = new Set();
+
+        document.querySelectorAll('a[href]').forEach(a => {
+          const href = a.getAttribute('href') || '';
+          const rel = (a.getAttribute('rel') || '').toLowerCase();
+          const aria = (a.getAttribute('aria-label') || '').toLowerCase();
+          for (const [key, rx] of Object.entries(patterns)) {
+            if (!acc[key] && (rx.test(href) || rx.test(rel) || rx.test(aria))) {
+              acc[key] = toAbs(href);
+            }
+          }
+          if (rxTwitter.test(href)) twitterAll.add(toAbs(href));
+        });
+
+        return { ...acc, twitterAll: Array.from(twitterAll) };
+      }, url);
+
+      // нормализуем твиттер → x.com
+      if (socials.twitterURL) socials.twitterURL = normalizeTwitter(socials.twitterURL);
+      if (Array.isArray(socials.twitterAll)) {
+        socials.twitterAll = socials.twitterAll.map(normalizeTwitter);
+      }
+
+      // для обратной совместимости возвращаем еще и html/text (если запрошено)
       let bodyHtml = null;
       let bodyText = null;
-
       if (html) {
-        bodyHtml = await page.content();
+        try { bodyHtml = await page.content(); } catch { bodyHtml = null; }
       }
       if (text || !html) {
         try {
-          bodyText = await page.evaluate(() => document.body && document.body.innerText ? document.body.innerText : '');
+          bodyText = await page.evaluate(() => document.body?.innerText || '');
         } catch {
           bodyText = '';
         }
@@ -111,11 +233,15 @@ async function browserFetch(opts) {
       const title = await page.title().catch(() => '');
       const headersObj = {};
       if (resp) {
-        for (const [k, v] of Object.entries(resp.headers() || {})) {
-          headersObj[k] = v;
-        }
+        try {
+          for (const [k, v] of Object.entries(resp.headers() || {})) {
+            headersObj[k] = v;
+          }
+        } catch {}
       }
       const cookiesOut = await context.cookies().catch(() => []);
+
+      const antiBot = await detectAntiBot(page, resp);
 
       const timing = {
         startedAt,
@@ -123,6 +249,7 @@ async function browserFetch(opts) {
         ms: Date.now() - startedAt,
       };
 
+      // итоговый json: совместим с Python-экстрактором
       return {
         ok,
         status,
@@ -135,6 +262,9 @@ async function browserFetch(opts) {
         cookies: cookiesOut,
         console: consoleLogs,
         timing,
+        antiBot,
+        websiteURL: url,
+        ...socials,
       };
     } finally {
       try { await page?.close(); } catch {}
@@ -143,36 +273,35 @@ async function browserFetch(opts) {
     }
   };
 
+  // ретраим всю попытку при фатальном падении
   let lastError = null;
   for (let i = 0; i < Math.max(1, retries); i++) {
     try {
       const res = await attempt();
-      // если страница совсем пустая — можно повторить
-      if (!res.ok && i + 1 < retries) continue;
       return res;
     } catch (e) {
       lastError = e;
-      if (i + 1 >= retries) {
-        return {
-          ok: false,
-          status: 0,
-          url,
-          finalUrl: url,
-          title: '',
-          html: null,
-          text: null,
-          headers: {},
-          cookies: [],
-          console: consoleLogs,
-          timing: { error: String(e && e.message || e) },
-        };
-      }
     }
   }
-  // теоретически не дойдем
-  throw lastError || new Error('unknown error');
+  // если все попытки упали - возвращаем структурированную ошибку
+  return {
+    ok: false,
+    status: 0,
+    url,
+    finalUrl: url,
+    title: '',
+    html: null,
+    text: null,
+    headers: {},
+    cookies: [],
+    console: consoleLogs,
+    timing: { error: String(lastError && (lastError.message || lastError)) },
+    antiBot: { detected: false, kind: '', server: '' },
+    websiteURL: url,
+  };
 }
 
+// CLI-режим: прочитать аргументы, выполнить, вывести JSON
 async function main() {
   if (require.main !== module) return;
   const args = parseArgs(process.argv);
@@ -184,7 +313,7 @@ async function main() {
       ok: false,
       status: 0,
       url: args.url || null,
-      error: String(e && e.message || e),
+      error: String(e && (e.message || e)),
     }));
     process.exitCode = 1;
   }

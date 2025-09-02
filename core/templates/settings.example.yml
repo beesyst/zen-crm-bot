@@ -27,8 +27,8 @@ crm:
     integration_id: "d4c70e79-632e-4fb5-a8c1-c4caa18e511d"
     stages_map: "config/stages.map.json"
     # Произвольные поля и режимы — тянем как есть, если юзер их добавил в settings.yml.
-    fields: {address: 195002, docs: 1048046, email: null, linkedin: 1047984, phone: null, reddit: 1047994,
-  telegram: 1047992, web: 787593, x: 954860, youtube: 1048044}
+    fields: {address: 195002, docs: 1048046, email: null, linkedin: 1047984, medium: 1315150,
+  phone: null, reddit: 1047994, telegram: 1047992, web: 787593, x: 954860, youtube: 1048044}
     safe_mode:
       dry_run: false
 ...

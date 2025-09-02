@@ -14,4 +14,3 @@ pyyaml
 python-dotenv
 python-json-logger
 python-multipart==0.0.20
-playwright~=1.55.0

@@ -28,7 +28,11 @@ from core.paths import (
 )
 from core.paths import PROJECT_ROOT as ROOT
 from core.settings import get_flag, get_image
-from core.tpl import generate_settings_example, sync_env_from_settings
+from core.tpl import (
+    generate_settings_example,
+    render_node_package_json,
+    sync_env_from_settings,
+)
 
 # Переменные окружения для playwright/node
 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(PLAYWRIGHT_CACHE)
@@ -291,47 +295,32 @@ def _maybe_clear_logs_once():
 
 # Подготовка: установка node/npm и playwright браузера в кеш проекта
 def ensure_node_deps():
+    # если нет package.json - ничего не делаем
     if not NODE_PKG.exists():
         return True, "no core/node/package.json — skip"
 
-    # node --version
-    rc, out = run_and_capture(["node", "--version"])
-    if rc != 0:
-        return False, "node not available"
+    # пытаемся использовать хостовый node/npm
+    rc_node, _ = run_and_capture(["node", "--version"])
+    rc_npm, _ = run_and_capture(["npm", "--version"])
+    if rc_node != 0 or rc_npm != 0:
+        return True, "host node/npm absent — will be installed inside Docker"
 
-    # npm --version
-    rc, out = run_and_capture(["npm", "--version"])
-    if rc != 0:
-        return False, "npm not available"
-
-    # npm ci / install
+    # если есть - поставим локально (ускорит npx в Docker build cache)
     if NODE_LOCK.exists():
         rc, _ = run_and_capture(["npm", "ci"], cwd=NODE_DIR)
     else:
         rc, _ = run_and_capture(["npm", "install", "--no-fund"], cwd=NODE_DIR)
     if rc != 0:
-        return False, "npm install failed"
+        return True, "host npm install failed — continue (Docker will handle)"
 
-    # playwright browsers → .ms-playwright
-    env = dict(os.environ)
-    env["PLAYWRIGHT_BROWSERS_PATH"] = str(PLAYWRIGHT_CACHE)
+    # попробуем поставить браузер кешом
     rc, _ = run_and_capture(
         ["npm", "run", "playwright:install", "--silent"],
         cwd=NODE_DIR,
     )
     if rc != 0:
-        # fallback: прямой вызов
-        rc, _ = run_and_capture(
-            ["npx", "playwright", "install", "chromium"],
-            cwd=NODE_DIR,
-        )
-        if rc != 0:
-            return False, "playwright install failed"
+        run_and_capture(["npx", "playwright", "install", "chromium"], cwd=NODE_DIR)
 
-    # экспорт путей в окружение текущего процесса
-    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(PLAYWRIGHT_CACHE)
-    node_modules_path = NODE_DIR / "node_modules"
-    os.environ["NODE_PATH"] = str(node_modules_path)
     return True, ""
 
 
@@ -409,11 +398,11 @@ def cmd_dev():
     check_required_files()
     _maybe_clear_logs_once()
     ensure_files()
+    generate_settings_example()
+    render_node_package_json()
     step("Node deps (npm + playwright)", ensure_node_deps)
     _export_compose_env()
     sync_env_from_settings()
-    generate_settings_example()
-
     check_prereqs()
     rc = sh_log_setup(compose_cmd("up", "--build"), cwd=DOCKER_DIR)
     print("Finish" if rc == 0 else "Finish (with errors — see logs/setup.log)")
@@ -426,10 +415,11 @@ def cmd_dev_bg():
     check_required_files()
     _maybe_clear_logs_once()
     ensure_files()
+    generate_settings_example()
+    render_node_package_json()
     step("Node deps (npm + playwright)", ensure_node_deps)
     _export_compose_env()
     sync_env_from_settings()
-    generate_settings_example()
     check_prereqs()
 
     def _up():
@@ -450,10 +440,11 @@ def cmd_prod_up():
     check_required_files()
     _maybe_clear_logs_once()
     ensure_files()
+    generate_settings_example()
+    render_node_package_json()  # <-- раньше
     step("Node deps (npm + playwright)", ensure_node_deps)
     _export_compose_env()
     sync_env_from_settings()
-    generate_settings_example()
     check_prereqs()
 
     def _up_bg():

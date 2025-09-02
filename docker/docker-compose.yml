@@ -7,6 +7,7 @@ services:
       args:
         PYTHON_VERSION: ${PYTHON_VERSION}
         PYTHON_DEBIAN: ${PYTHON_DEBIAN}
+        NODE_VERSION: ${NODE_VERSION}
       network: host
     env_file: [../.env]
     ports: ["8000:8000"]
@@ -33,6 +34,7 @@ services:
       args:
         PYTHON_VERSION: ${PYTHON_VERSION}
         PYTHON_DEBIAN: ${PYTHON_DEBIAN}
+        NODE_VERSION: ${NODE_VERSION}
       network: host
     command: celery -A worker.tasks worker --loglevel=INFO
     env_file: [../.env]
@@ -54,6 +56,7 @@ services:
       args:
         PYTHON_VERSION: ${PYTHON_VERSION}
         PYTHON_DEBIAN: ${PYTHON_DEBIAN}
+        NODE_VERSION: ${NODE_VERSION}
       network: host
     command: >
       celery -A worker.tasks beat
@@ -111,6 +114,7 @@ services:
       args:
         PYTHON_VERSION: ${PYTHON_VERSION}
         PYTHON_DEBIAN: ${PYTHON_DEBIAN}
+        NODE_VERSION: ${NODE_VERSION}
       network: host
     env_file: [../.env]
     depends_on:
