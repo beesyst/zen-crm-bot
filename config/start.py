@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import re as _re
 import shutil
 import subprocess
 import sys
@@ -20,7 +21,6 @@ from core.console import step
 from core.log_setup import clear_all_logs, get_logger
 from core.paths import (
     LOG_PATHS,
-    NODE_PKG,
     ensure_dirs,
 )
 from core.paths import PROJECT_ROOT as ROOT
@@ -272,9 +272,9 @@ def ensure_files():
     # проверка compose-файлов
     def _compose_files():
         base = DOCKER_DIR / "docker-compose.yml"
-        override = DOCKER_DIR / "docker-compose.override.yml"
-        ok = base.exists() and override.exists()
-        return (ok, "" if ok else f"missing {base if not base.exists() else override}")
+        if base.exists():
+            return True, ""
+        return False, f"missing {base}"
 
     step("docker-compose files", _compose_files)
 
@@ -286,18 +286,59 @@ def _maybe_clear_logs_once():
         clear_all_logs()
 
 
-# Подготовка: установка node/npm и playwright браузера в кеш проекта
-def ensure_node_deps():
-    # Docker-only: все node/npm/playwright ставится в контейнере
-    if not NODE_PKG.exists():
-        return True, "no core/node/package.json - skip"
-    return True, "handled inside Docker build"
-
-
 # Подготовка: экспорт значений образов в окружение процесса для compose-вызовов
 def _export_compose_env():
     os.environ["POSTGRES_IMAGE"] = get_image("postgres")
     os.environ["REDIS_IMAGE"] = get_image("redis")
+
+
+def _app_image_tag() -> str:
+    py = os.environ.get("PYTHON_VERSION", "").strip()
+    deb = os.environ.get("PYTHON_DEBIAN", "").strip()
+    node = os.environ.get("NODE_VERSION", "").strip()
+    return f"zencrm-app:{py}-{deb}-{node}"
+
+
+def _last_line(text: str) -> str:
+    lines = [l.strip() for l in (text or "").splitlines() if l.strip()]
+    return lines[-1] if lines else ""
+
+
+def _only_node_ver(s: str) -> str:
+    m = _re.search(r"\bv?(\d+\.\d+\.\d+)\b", s)
+    return f"v{m.group(1)}" if m else (s.strip() or "unknown")
+
+
+def _only_pw_ver(s: str) -> str:
+    m = _re.search(r"(\d+\.\d+\.\d+)", s)
+    return m.group(1) if m else (s.strip() or "unknown")
+
+
+# Возврат (full, repo), например ("zencrm-app:3.13.7-slim-bookworm-24.7.0", "zencrm-app").
+def _find_app_image() -> tuple[str, str]:
+    # попробуем через compose ps
+    rc, out = run_and_capture(
+        compose_cmd("ps", "--format", "{{.Image}}"), cwd=DOCKER_DIR
+    )
+    if rc == 0 and out:
+        for line in out.splitlines():
+            img = line.strip()
+            if img.startswith("zencrm-app:"):
+                repo, tag = img.split(":", 1)
+                return img, repo
+
+    # fallback: docker images
+    rc, out = run_and_capture(
+        ["docker", "images", "zencrm-app", "--format", "{{.Repository}}:{{.Tag}}"]
+    )
+    if rc == 0 and out:
+        img = out.splitlines()[0].strip()
+        if ":" in img:
+            repo, tag = img.split(":", 1)
+            return img, repo
+
+    # совсем ничего не нашли
+    return "zencrm-app:unknown", "zencrm-app"
 
 
 # Проверка: docker / compose / (опц.) postgres-образа из settings.yml
@@ -306,15 +347,28 @@ def check_prereqs(require_postgres: bool = False):
 
     def _docker():
         rc, out = run_and_capture(["docker", "--version"])
-        return (rc == 0 and out), (
-            _suffix(out, "Docker") if rc == 0 and out else "not available"
-        )
+        # "Docker version 28.3.3, build 980b856"
+        if out:
+            m = re.search(r"version\s+([^\s,]+)(?:,\s*build\s+([0-9a-f]+))?", out, re.I)
+            if m:
+                ver = m.group(1)
+                build = m.group(2) or ""
+                msg = f"{ver}" + (f", build {build}" if build else "")
+            else:
+                msg = out.strip()
+        else:
+            msg = "not available"
+        return (rc == 0 and out), msg
 
     def _compose():
         rc, out = run_and_capture(["docker", "compose", "version"])
-        return (rc == 0 and out), (
-            _suffix(out, "Docker Compose") if rc == 0 and out else "not available"
-        )
+        # "Docker Compose version v2.39.1"
+        if out:
+            m = re.search(r"version\s+(v?\d+\.\d+\.\d+)", out, re.I)
+            msg = m.group(1) if m else out.strip()
+        else:
+            msg = "not available"
+        return (rc == 0 and out), msg
 
     ok &= step("Docker", _docker)
     ok &= step("Docker Compose", _compose)
@@ -347,6 +401,164 @@ def _run_modes_after_up():
         )
 
 
+# Общий пайплайн
+def _pipeline_up(*, detached: bool, run_modes: bool) -> int:
+    postgres_image = os.environ.get("POSTGRES_IMAGE", "postgres:latest")
+    redis_image = os.environ.get("REDIS_IMAGE", "redis:latest")
+
+    def _prep_docker():
+        # все пишем в setup.log, step только рисует спиннер/итог
+        rc1 = sh_log_setup(compose_cmd("pull", "redis", "db"), cwd=DOCKER_DIR)
+        rc2 = sh_log_setup(compose_cmd("build"), cwd=DOCKER_DIR)
+        args = ["up", "-d"] if detached else ["up"]
+        rc3 = sh_log_setup(compose_cmd(*args), cwd=DOCKER_DIR)
+        rc = 0 if (rc1 == 0 and rc2 == 0 and rc3 == 0) else 1
+        return (rc == 0), ("" if rc == 0 else "failed")
+
+    step("Docker (pull/build/up)", _prep_docker)
+
+    # определяем app image/repo по факту
+    app_image_full, app_repo = _find_app_image()
+
+    # версии postgres/redis - из контейнеров
+    def _pg_version():
+        rc, out = run_and_capture(
+            compose_cmd(
+                "exec", "-T", "db", "sh", "-lc", "psql --version || postgres -V"
+            ),
+            cwd=DOCKER_DIR,
+        )
+        line = _last_line(out)
+        ver = ""
+
+        # "psql (PostgreSQL) 17.6 (...)" -> "17.6 (...)", "postgres (PostgreSQL) 17.6 (...)" -> "17.6 (...)"
+        if line:
+            m = _re.search(r"\(PostgreSQL\)\s*(.+)$", line)  # общий случай
+            if m:
+                ver = m.group(1).strip()
+
+        ok_ = rc == 0 and bool(ver)
+        return ok_, (ver if ok_ else "not available")
+
+    def _redis_version():
+        rc, out = run_and_capture(
+            compose_cmd(
+                "exec",
+                "-T",
+                "redis",
+                "sh",
+                "-lc",
+                "redis-server --version || redis-cli --version",
+            ),
+            cwd=DOCKER_DIR,
+        )
+        line = _last_line(out)
+        ver = ""
+        # "Redis server v=8.2.1 ..." -> "8.2.1" или "redis-cli 8.2.1" -> "8.2.1"
+        m = _re.search(r"\bv=([\d\.]+)", line)
+        if m:
+            ver = m.group(1)
+        else:
+            m = _re.search(r"\b(\d+\.\d+\.\d+)\b", line)
+            if m:
+                ver = m.group(1)
+
+        ok_ = rc == 0 and bool(ver)
+        return ok_, (ver if ok_ else "not available")
+
+    # сводка по образам
+    def _image_app():
+        tag = app_image_full.split(":", 1)[1] if ":" in app_image_full else "unknown"
+        return True, tag
+
+    def _image_pg():
+        tag = postgres_image.split(":", 1)[1] if ":" in postgres_image else "latest"
+        return True, tag
+
+    def _image_redis():
+        tag = redis_image.split(":", 1)[1] if ":" in redis_image else "latest"
+        return True, tag
+
+    # контейнеры
+    def _containers_emit():
+        rc, out = run_and_capture(
+            compose_cmd("ps", "--format", "{{.Name}} {{.Image}}"),
+            cwd=DOCKER_DIR,
+        )
+        if rc != 0 or not out:
+            return False, "not available"
+
+        lines = [l.strip() for l in out.splitlines() if l.strip()]
+
+        # порядок: db, redis, api, worker, beat
+        prio = {
+            "docker-db-1": 0,
+            "docker-redis-1": 1,
+            "docker-api-1": 2,
+            "docker-worker-1": 3,
+            "docker-beat-1": 4,
+        }
+        parsed = []
+        for line in lines:
+            try:
+                name, image = line.split(" ", 1)
+                parsed.append((prio.get(name, 100), name, image))
+            except ValueError:
+                continue
+
+        for _, name, image in sorted(parsed, key=lambda x: (x[0], x[1])):
+            # хотим ровно: [ok] container - <name> - <image>
+            step(f"container - {name}", lambda n=name, i=image: (True, f"- {i}"))
+
+        return True, ""
+
+    # Node/Playwright из образа приложения - указываем repo (без тега)
+    def _node_version():
+        rc, out = run_and_capture(
+            compose_cmd("run", "--rm", "job", "sh", "-lc", "node -v"),
+            cwd=DOCKER_DIR,
+        )
+        ver = _only_node_ver(_last_line(out))  # "v24.7.0"
+        ok_ = rc == 0 and ver != "unknown"
+        return ok_, f"{ver} — image {app_repo}"
+
+    def _playwright_version():
+        cmd = r"""sh -lc '
+    if command -v playwright >/dev/null 2>&1; then
+    playwright --version
+    else
+    node -e "try{console.log(require(\"playwright/package.json\").version)}catch(e){process.exit(2)}" || echo "not installed"
+    fi
+    ' """
+        rc, out = run_and_capture(
+            compose_cmd("run", "--rm", "job", "sh", "-lc", cmd), cwd=DOCKER_DIR
+        )
+        line = _last_line(out).strip()
+        if line.lower().startswith("playwright"):
+            line = _only_pw_ver(line)  # "1.55.0"
+        ok_ = (
+            (rc == 0)
+            and (line.lower() != "not installed")
+            and bool(_re.search(r"\d+\.\d+\.\d+", line))
+        )
+        suffix = (line if ok_ else "not installed") + f" — image {app_repo}"
+        return ok_, suffix
+
+    # печатаем в желаемом порядке
+    step("image - zencrm-app", _image_app)
+    step("image - postgres", _image_pg)
+    step("image - redis", _image_redis)
+    _containers_emit()
+    step("PostgreSQL", _pg_version)
+    step("Redis", _redis_version)
+    step("Node", _node_version)
+    step("Playwright", _playwright_version)
+
+    if run_modes:
+        _run_modes_after_up()
+    return 0
+
+
 # Команда: локальный запуск в форграунде (build + up)
 def cmd_dev():
     print("Start")
@@ -355,15 +567,12 @@ def cmd_dev():
     ensure_files()
     generate_settings_example()
     render_node_package_json()
-    step("Node deps (npm + playwright)", ensure_node_deps)
     _export_compose_env()
     sync_env_from_settings()
     check_prereqs(require_postgres=False)
-    if sh_log_setup(compose_cmd("build"), cwd=DOCKER_DIR) != 0:
-        print("Finish (with errors — see logs/setup.log)")
-        sys.exit(1)
-    rc = sh_log_setup(compose_cmd("up"), cwd=DOCKER_DIR)
-    print("Finish" if rc == 0 else "Finish (with errors — see logs/setup.log)")
+
+    rc = _pipeline_up(detached=False, run_modes=False)
+    print("Finish" if rc == 0 else "Finish (with errors - see logs/setup.log)")
     sys.exit(rc)
 
 
@@ -375,27 +584,13 @@ def cmd_dev_bg():
     ensure_files()
     generate_settings_example()
     render_node_package_json()
-    step("Node deps (npm + playwright)", ensure_node_deps)
     _export_compose_env()
     sync_env_from_settings()
     check_prereqs(require_postgres=False)
 
-    def _build():
-        rc = sh_log_setup(compose_cmd("build"), cwd=DOCKER_DIR)
-        return (rc == 0), ("" if rc == 0 else "compose build failed")
-
-    def _up():
-        rc = sh_log_setup(compose_cmd("up", "-d"), cwd=DOCKER_DIR)
-        return (rc == 0), ("" if rc == 0 else "compose up failed")
-
-    if not step("docker compose build (app image)", _build):
-        sys.exit(1)
-    if not step("docker compose up (detached)", _up):
-        sys.exit(1)
-
-    _run_modes_after_up()
-    print("Finish")
-    sys.exit(0)
+    rc = _pipeline_up(detached=True, run_modes=True)
+    print("Finish" if rc == 0 else "Finish (with errors — see logs/setup.log)")
+    sys.exit(rc)
 
 
 # Команада: продовый запуск в фоне (build + up -d)
@@ -406,28 +601,13 @@ def cmd_prod_up():
     ensure_files()
     generate_settings_example()
     render_node_package_json()
-    step("Node deps (npm + playwright)", ensure_node_deps)
     _export_compose_env()
     sync_env_from_settings()
     check_prereqs(require_postgres=False)
 
-    def _build():
-        rc = sh_log_setup(compose_cmd("build"), cwd=DOCKER_DIR)
-        return (rc == 0), ("" if rc == 0 else "compose build failed")
-
-    def _up_bg():
-        rc = sh_log_setup(compose_cmd("up", "-d"), cwd=DOCKER_DIR)
-        return (rc == 0), ("" if rc == 0 else "compose up failed")
-
-    if not step("docker compose build (app image)", _build):
-        sys.exit(1)
-
-    if not step("docker compose up (detached)", _up_bg):
-        sys.exit(1)
-
-    _run_modes_after_up()
-    print("Finish")
-    sys.exit(0)
+    rc = _pipeline_up(detached=True, run_modes=True)
+    print("Finish" if rc == 0 else "Finish (with errors — see logs/setup.log)")
+    sys.exit(rc)
 
 
 # Команада: разовый запуск research CLI внутри job-контейнера
