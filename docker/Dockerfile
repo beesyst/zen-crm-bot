@@ -91,19 +91,22 @@ COPY . /app
 
 # Перенос node_modules локальных скриптов
 COPY --from=deps /app/core/node/node_modules /app/core/node/node_modules
+# Чтобы Node-железо видело пакеты и их бинарники
 ENV NODE_PATH=/app/core/node/node_modules
+ENV PATH="/app/core/node/node_modules/.bin:/usr/local/node/bin:${PATH}"
 
-# Безопасный пользователь
+# чтобы login-shell не стирал PATH — добавим профиль
+RUN printf '%s\n' \
+  'export NODE_PATH=/app/core/node/node_modules' \
+  'export PLAYWRIGHT_BROWSERS_PATH=/ms-playwright' \
+  'export PATH="/app/core/node/node_modules/.bin:/usr/local/node/bin:$PATH"' \
+  > /etc/profile.d/10-app-path.sh && chmod +x /etc/profile.d/10-app-path.sh
+
+# (опционально) шорткаты, чтобы бинарь был виден даже при сломанном PATH
+RUN ln -sf /app/core/node/node_modules/.bin/playwright /usr/local/bin/playwright
+
 RUN useradd -ms /bin/bash appuser && \
     chown -R appuser:appuser /app /ms-playwright /usr/local /usr/local/node
 USER appuser
 
-# Целевые стадии
-FROM runtime AS api
-CMD ["uvicorn","app.main:app","--host","0.0.0.0","--port","8000"]
 
-FROM runtime AS worker
-CMD ["celery","-A","worker.tasks","worker","--loglevel=INFO"]
-
-FROM runtime AS beat
-CMD ["celery","-A","worker.tasks","beat","--loglevel=INFO"]

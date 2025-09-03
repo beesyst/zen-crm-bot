@@ -20,10 +20,7 @@ from core.console import step
 from core.log_setup import clear_all_logs, get_logger
 from core.paths import (
     LOG_PATHS,
-    NODE_DIR,
-    NODE_LOCK,
     NODE_PKG,
-    PLAYWRIGHT_CACHE,
     ensure_dirs,
 )
 from core.paths import PROJECT_ROOT as ROOT
@@ -33,10 +30,6 @@ from core.tpl import (
     render_node_package_json,
     sync_env_from_settings,
 )
-
-# Переменные окружения для playwright/node
-os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(PLAYWRIGHT_CACHE)
-os.environ["NODE_PATH"] = str(NODE_DIR / "node_modules")
 
 SETUP_LOGGER = get_logger("setup")
 HOST_LOGGER = get_logger("host")
@@ -295,33 +288,10 @@ def _maybe_clear_logs_once():
 
 # Подготовка: установка node/npm и playwright браузера в кеш проекта
 def ensure_node_deps():
-    # если нет package.json - ничего не делаем
+    # Docker-only: все node/npm/playwright ставится в контейнере
     if not NODE_PKG.exists():
-        return True, "no core/node/package.json — skip"
-
-    # пытаемся использовать хостовый node/npm
-    rc_node, _ = run_and_capture(["node", "--version"])
-    rc_npm, _ = run_and_capture(["npm", "--version"])
-    if rc_node != 0 or rc_npm != 0:
-        return True, "host node/npm absent — will be installed inside Docker"
-
-    # если есть - поставим локально (ускорит npx в Docker build cache)
-    if NODE_LOCK.exists():
-        rc, _ = run_and_capture(["npm", "ci"], cwd=NODE_DIR)
-    else:
-        rc, _ = run_and_capture(["npm", "install", "--no-fund"], cwd=NODE_DIR)
-    if rc != 0:
-        return True, "host npm install failed — continue (Docker will handle)"
-
-    # попробуем поставить браузер кешом
-    rc, _ = run_and_capture(
-        ["npm", "run", "playwright:install", "--silent"],
-        cwd=NODE_DIR,
-    )
-    if rc != 0:
-        run_and_capture(["npx", "playwright", "install", "chromium"], cwd=NODE_DIR)
-
-    return True, ""
+        return True, "no core/node/package.json - skip"
+    return True, "handled inside Docker build"
 
 
 # Подготовка: экспорт значений образов в окружение процесса для compose-вызовов
@@ -331,41 +301,26 @@ def _export_compose_env():
 
 
 # Проверка: docker / compose / (опц.) postgres-образа из settings.yml
-def check_prereqs(require_postgres: bool = True):
+def check_prereqs(require_postgres: bool = False):
     ok = True
 
     def _docker():
         rc, out = run_and_capture(["docker", "--version"])
-        if rc == 0 and out:
-            return True, _suffix(out, "Docker")
-        return False, "not available"
+        return (rc == 0 and out), (
+            _suffix(out, "Docker") if rc == 0 and out else "not available"
+        )
 
     def _compose():
         rc, out = run_and_capture(["docker", "compose", "version"])
-        if rc == 0 and out:
-            return True, _suffix(out, "Docker Compose")
-        return False, "not available"
+        return (rc == 0 and out), (
+            _suffix(out, "Docker Compose") if rc == 0 and out else "not available"
+        )
 
     ok &= step("Docker", _docker)
     ok &= step("Docker Compose", _compose)
 
-    if require_postgres:
-
-        def _postgres():
-            # берем образ из settings.yml (через core.settings.get_image)
-            pg_image = get_image("postgres")
-            rc, out = run_and_capture(
-                ["docker", "run", "--rm", "--pull=missing", pg_image, "postgres", "-V"]
-            )
-            if rc == 0 and out:
-                line = (out or "").splitlines()[-1].strip()
-                return True, _suffix(line, "postgres")
-            return False, "not available"
-
-        ok &= step("Postgres", _postgres)
-
     if not ok:
-        print("\n[error] Docker/Postgres checks failed. See logs/setup.log")
+        print("\n[error] Docker checks failed. See logs/setup.log")
         sys.exit(1)
 
 
@@ -403,8 +358,11 @@ def cmd_dev():
     step("Node deps (npm + playwright)", ensure_node_deps)
     _export_compose_env()
     sync_env_from_settings()
-    check_prereqs()
-    rc = sh_log_setup(compose_cmd("up", "--build"), cwd=DOCKER_DIR)
+    check_prereqs(require_postgres=False)
+    if sh_log_setup(compose_cmd("build"), cwd=DOCKER_DIR) != 0:
+        print("Finish (with errors — see logs/setup.log)")
+        sys.exit(1)
+    rc = sh_log_setup(compose_cmd("up"), cwd=DOCKER_DIR)
     print("Finish" if rc == 0 else "Finish (with errors — see logs/setup.log)")
     sys.exit(rc)
 
@@ -420,12 +378,18 @@ def cmd_dev_bg():
     step("Node deps (npm + playwright)", ensure_node_deps)
     _export_compose_env()
     sync_env_from_settings()
-    check_prereqs()
+    check_prereqs(require_postgres=False)
+
+    def _build():
+        rc = sh_log_setup(compose_cmd("build"), cwd=DOCKER_DIR)
+        return (rc == 0), ("" if rc == 0 else "compose build failed")
 
     def _up():
-        rc = sh_log_setup(compose_cmd("up", "-d", "--build"), cwd=DOCKER_DIR)
+        rc = sh_log_setup(compose_cmd("up", "-d"), cwd=DOCKER_DIR)
         return (rc == 0), ("" if rc == 0 else "compose up failed")
 
+    if not step("docker compose build (app image)", _build):
+        sys.exit(1)
     if not step("docker compose up (detached)", _up):
         sys.exit(1)
 
@@ -441,15 +405,22 @@ def cmd_prod_up():
     _maybe_clear_logs_once()
     ensure_files()
     generate_settings_example()
-    render_node_package_json()  # <-- раньше
+    render_node_package_json()
     step("Node deps (npm + playwright)", ensure_node_deps)
     _export_compose_env()
     sync_env_from_settings()
-    check_prereqs()
+    check_prereqs(require_postgres=False)
+
+    def _build():
+        rc = sh_log_setup(compose_cmd("build"), cwd=DOCKER_DIR)
+        return (rc == 0), ("" if rc == 0 else "compose build failed")
 
     def _up_bg():
-        rc = sh_log_setup(compose_cmd("up", "-d", "--build"), cwd=DOCKER_DIR)
+        rc = sh_log_setup(compose_cmd("up", "-d"), cwd=DOCKER_DIR)
         return (rc == 0), ("" if rc == 0 else "compose up failed")
+
+    if not step("docker compose build (app image)", _build):
+        sys.exit(1)
 
     if not step("docker compose up (detached)", _up_bg):
         sys.exit(1)

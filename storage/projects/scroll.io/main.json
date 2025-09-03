@@ -2,12 +2,12 @@
   "name": "Scroll",
   "socialLinks": {
     "websiteURL": "https://scroll.io",
-    "twitterURL": "https://x.com/Scroll_ZKP",
-    "discordURL": "https://discord.gg/scroll",
-    "githubURL": "https://github.com/scroll-tech",
+    "twitterURL": "",
+    "discordURL": "",
+    "githubURL": "",
     "mediumURL": "",
-    "youtubeURL": "https://www.youtube.com/@Scroll_ZKP",
-    "telegramURL": "https://t.me/+0tvdw8QMJBMyOTli",
+    "youtubeURL": "",
+    "telegramURL": "",
     "documentURL": "",
     "linkedinURL": "",
     "redditURL": ""
@@ -21,6 +21,5 @@
   "seo": {},
   "coinData": {},
   "videoSlider": [],
-  "svgLogo": "",
-  "youtubeHandle": "@Scroll_ZKP"
+  "svgLogo": ""
 }

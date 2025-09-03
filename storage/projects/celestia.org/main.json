@@ -1,16 +1,16 @@
 {
-  "name": "Celestia - The Modular Blockchain Network | Celestia",
+  "name": "Celestia",
   "socialLinks": {
     "websiteURL": "https://celestia.org",
-    "twitterURL": "https://x.com/celestia",
-    "discordURL": "https://discord.com/invite/YsnTPcSfWQ",
-    "githubURL": "https://github.com/celestiaorg",
+    "twitterURL": "https://x.com/Celestia",
+    "discordURL": "",
+    "githubURL": "",
     "mediumURL": "",
     "youtubeURL": "",
-    "telegramURL": "https://t.me/CelestiaCommunity",
-    "documentURL": "",
+    "telegramURL": "",
+    "documentURL": "https://docs.celestia.org",
     "linkedinURL": "",
-    "redditURL": "https://www.reddit.com/r/CelestiaNetwork"
+    "redditURL": ""
   },
   "contacts": {
     "contactEmail": "",

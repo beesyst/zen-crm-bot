@@ -1,16 +1,27 @@
+x-app-image: &app_image zencrm-app:${PYTHON_VERSION}-${PYTHON_DEBIAN}-${NODE_VERSION}
+
+x-app-build: &app_build
+  context: ..
+  dockerfile: docker/Dockerfile
+  target: runtime
+  args:
+    PYTHON_VERSION: ${PYTHON_VERSION}
+    PYTHON_DEBIAN: ${PYTHON_DEBIAN}
+    NODE_VERSION: ${NODE_VERSION}
+
 services:
   api:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-      target: api
+      target: runtime
       args:
         PYTHON_VERSION: ${PYTHON_VERSION}
         PYTHON_DEBIAN: ${PYTHON_DEBIAN}
         NODE_VERSION: ${NODE_VERSION}
-      network: host
+    image: *app_image
+    network_mode: host
     env_file: [../.env]
-    ports: ["8000:8000"]
     depends_on:
       redis:
         condition: service_healthy
@@ -25,18 +36,12 @@ services:
       interval: 15s
       timeout: 5s
       retries: 10
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
   worker:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-      target: worker
-      args:
-        PYTHON_VERSION: ${PYTHON_VERSION}
-        PYTHON_DEBIAN: ${PYTHON_DEBIAN}
-        NODE_VERSION: ${NODE_VERSION}
-      network: host
-    command: celery -A worker.tasks worker --loglevel=INFO
+    image: *app_image
+    build: *app_build
+    network_mode: host
     env_file: [../.env]
     depends_on:
       redis:
@@ -47,21 +52,12 @@ services:
       - ../logs:/app/logs
       - ../storage:/app/storage
     restart: unless-stopped
+    command: ["celery", "-A", "worker.tasks", "worker", "--loglevel=INFO"]
 
   beat:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-      target: beat
-      args:
-        PYTHON_VERSION: ${PYTHON_VERSION}
-        PYTHON_DEBIAN: ${PYTHON_DEBIAN}
-        NODE_VERSION: ${NODE_VERSION}
-      network: host
-    command: >
-      celery -A worker.tasks beat
-      --loglevel=INFO
-      --schedule /app/storage/celery/celerybeat-schedule
+    image: *app_image
+    build: *app_build
+    network_mode: host
     env_file: [../.env]
     depends_on:
       redis:
@@ -73,6 +69,30 @@ services:
       - ../storage:/app/storage
       - ../storage/celery:/app/storage/celery
     restart: unless-stopped
+    command:
+      [
+        "celery",
+        "-A",
+        "worker.tasks",
+        "beat",
+        "--loglevel=INFO",
+        "--schedule",
+        "/app/storage/celery/celerybeat-schedule",
+      ]
+
+  job:
+    image: *app_image
+    build: *app_build
+    network_mode: host
+    env_file: [../.env]
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    volumes:
+      - ../logs:/app/logs
+      - ../storage:/app/storage
 
   redis:
     image: ${REDIS_IMAGE}
@@ -105,26 +125,6 @@ services:
       timeout: 5s
       retries: 10
     restart: unless-stopped
-
-  job:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-      target: runtime
-      args:
-        PYTHON_VERSION: ${PYTHON_VERSION}
-        PYTHON_DEBIAN: ${PYTHON_DEBIAN}
-        NODE_VERSION: ${NODE_VERSION}
-      network: host
-    env_file: [../.env]
-    depends_on:
-      redis:
-        condition: service_healthy
-      db:
-        condition: service_healthy
-    volumes:
-      - ../logs:/app/logs
-      - ../storage:/app/storage
 
 volumes:
   db_data:
