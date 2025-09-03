@@ -244,6 +244,33 @@ bash start.sh
 | `channels`               | Конфиг каналов (Discord, Telegram).            |
 | `outreach.order`         | Приоритет каналов аутрича.                     |
 
+## Роли контейнеров
+
+Все сервисы используют общий образ `zencrm-app` и одни и те же переменные окружения. Логи и рабочие данные монтируются в `./logs` и `./storage`.
+
+- **api** — веб-приложение (FastAPI, HTTP API)
+  - Отвечает на запросы: `/health`, `/admin/*`, `/webhooks/*`.
+  - Работает с PostgreSQL и Redis, ставит фоновые задания в очередь Celery.
+  - Запускается через `uvicorn app.main:app --host 0.0.0.0 --port 8000`.
+  - Проверка: `curl -fsS http://localhost:8000/health`.
+
+- **worker** — исполнитель фоновых задач (Celery worker)
+  - Обрабатывает пайплайны `ingest → dedupe → plan → dispatch → finalize`.
+  - Выполняет парсинг сайтов (в т.ч. через Playwright), enrichment карточек и вспомогательные задачи.
+  - Запускается как `celery -A worker.tasks worker --loglevel=INFO`.
+
+- **beat** — планировщик периодических задач (Celery beat)
+  - По расписанию кидает задачи воркеру (например, `seed_next_company` каждые 60 сек).
+  - Состояние расписания хранит в `storage/celery/celerybeat-schedule` (папка примонтирована).
+  - Запускается как  
+    `celery -A worker.tasks beat --loglevel=INFO --schedule /app/storage/celery/celerybeat-schedule`.
+
+- **job** — одноразовый рабочий контейнер для ручных запусков
+  - Используется для утилит и разовых пайплайнов, наследует окружение приложения.
+  - Примеры:
+    - `docker compose run --rm job python -m cli.research`
+    - `docker compose run --rm job python -m cli.enrich`
+  - Не имеет healthcheck/автоперезапуска, завершается по окончании команды.
 
 
 

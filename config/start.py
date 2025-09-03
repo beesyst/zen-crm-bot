@@ -512,37 +512,50 @@ def _pipeline_up(*, detached: bool, run_modes: bool) -> int:
 
         return True, ""
 
-    # Node/Playwright из образа приложения - указываем repo (без тега)
+    # node/playwright из образа приложения - указываем repo (без тега)
     def _node_version():
         rc, out = run_and_capture(
-            compose_cmd("run", "--rm", "job", "sh", "-lc", "node -v"),
+            compose_cmd("exec", "-T", "api", "sh", "-lc", "node -v"),
             cwd=DOCKER_DIR,
         )
-        ver = _only_node_ver(_last_line(out))  # "v24.7.0"
+        ver = _only_node_ver(_last_line(out))
         ok_ = rc == 0 and ver != "unknown"
         return ok_, f"{ver} — image {app_repo}"
 
     def _playwright_version():
-        cmd = r"""sh -lc '
-    if command -v playwright >/dev/null 2>&1; then
-    playwright --version
-    else
-    node -e "try{console.log(require(\"playwright/package.json\").version)}catch(e){process.exit(2)}" || echo "not installed"
-    fi
-    ' """
-        rc, out = run_and_capture(
-            compose_cmd("run", "--rm", "job", "sh", "-lc", cmd), cwd=DOCKER_DIR
+        # быстрая проверка: бинарь playwright в path в job
+        rc1, out1 = run_and_capture(
+            compose_cmd(
+                "run",
+                "--rm",
+                "job",
+                "sh",
+                "-lc",
+                "command -v playwright >/dev/null 2>&1 && playwright --version || true",
+            ),
+            cwd=DOCKER_DIR,
         )
-        line = _last_line(out).strip()
-        if line.lower().startswith("playwright"):
-            line = _only_pw_ver(line)  # "1.55.0"
-        ok_ = (
-            (rc == 0)
-            and (line.lower() != "not installed")
-            and bool(_re.search(r"\d+\.\d+\.\d+", line))
+        m1 = _re.search(r"(\d+\.\d+\.\d+)", out1 or "")
+        if rc1 == 0 and m1:
+            return True, f"{m1.group(1)} — image zencrm-app"
+
+        # фолбэк: через npx (если по какой-то причине path не содержит симлинк)
+        rc2, out2 = run_and_capture(
+            compose_cmd(
+                "run",
+                "--rm",
+                "job",
+                "sh",
+                "-lc",
+                "npx --yes playwright --version || true",
+            ),
+            cwd=DOCKER_DIR,
         )
-        suffix = (line if ok_ else "not installed") + f" — image {app_repo}"
-        return ok_, suffix
+        m2 = _re.search(r"(\d+\.\d+\.\d+)", out2 or "")
+        if rc2 == 0 and m2:
+            return True, f"{m2.group(1)} — image zencrm-app"
+
+        return False, "not installed — image zencrm-app"
 
     # печатаем в желаемом порядке
     step("image - zencrm-app", _image_app)
