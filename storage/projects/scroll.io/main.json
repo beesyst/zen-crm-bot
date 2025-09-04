@@ -2,15 +2,18 @@
   "name": "Scroll",
   "socialLinks": {
     "websiteURL": "https://scroll.io",
-    "twitterURL": "",
-    "discordURL": "",
-    "githubURL": "",
+    "twitterURL": "https://x.com/Scroll_ZKP",
+    "discordURL": "https://discord.gg/scroll",
+    "githubURL": "https://github.com/scroll-tech",
     "mediumURL": "",
-    "youtubeURL": "",
-    "telegramURL": "",
+    "youtubeURL": "https://www.youtube.com/@Scroll_ZKP",
+    "telegramURL": "https://t.me/+0tvdw8QMJBMyOTli",
     "documentURL": "",
     "linkedinURL": "",
-    "redditURL": ""
+    "redditURL": "",
+    "url": "https://scroll.io",
+    "finalUrl": "https://scroll.io",
+    "title": "Scroll - Native zkEVM Layer 2 for Ethereum"
   },
   "contacts": {
     "contactEmail": "",
@@ -21,5 +24,6 @@
   "seo": {},
   "coinData": {},
   "videoSlider": [],
-  "svgLogo": ""
+  "svgLogo": "",
+  "youtubeHandle": "@Scroll_ZKP"
 }

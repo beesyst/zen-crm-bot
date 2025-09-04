@@ -2,7 +2,7 @@ const { chromium } = require('playwright');
 const { newInjectedContext } = require('fingerprint-injector');
 
 // Разрешенные режимы ожидания
-const WAIT_STATES = new Set(['load', 'domcontentloaded', 'networkidle', 'nowait']);
+const WAIT_STATES = new Set(['load', 'domcontentloaded', 'networkidle', 'commit', 'nowait']);
 
 // Парсинг аргументов CLI
 function parseArgs(argv) {
@@ -11,6 +11,7 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a === '--html') args.html = true;
     else if (a === '--text') args.text = true;
+    else if (a === '--socials') args.socials = true;
     else if (a === '--js') { args.js = String(argv[++i]).toLowerCase() !== 'false'; }
     else if (a === '--url') args.url = argv[++i];
     else if (a === '--wait') args.wait = argv[++i];
@@ -196,7 +197,9 @@ async function browserFetch(opts) {
         const twitterAll = new Set();
 
         document.querySelectorAll('a[href]').forEach(a => {
-          const href = a.getAttribute('href') || '';
+          const raw = a.getAttribute('href') || '';
+          const href = raw.trim();
+          if (!href || href.startsWith('javascript:') || href.startsWith('mailto:') || href.startsWith('tel:')) return;
           const rel = (a.getAttribute('rel') || '').toLowerCase();
           const aria = (a.getAttribute('aria-label') || '').toLowerCase();
           for (const [key, rx] of Object.entries(patterns)) {
@@ -217,20 +220,21 @@ async function browserFetch(opts) {
       }
 
       // для обратной совместимости возвращаем еще и html/text (если запрошено)
+      const wantSocials = !!opts.socials;
       let bodyHtml = null;
       let bodyText = null;
-      if (html) {
-        try { bodyHtml = await page.content(); } catch { bodyHtml = null; }
+
+      if (!wantSocials && html) {
+        try { bodyHtml = await page.content(); } catch {}
       }
-      if (text || !html) {
-        try {
-          bodyText = await page.evaluate(() => document.body?.innerText || '');
-        } catch {
-          bodyText = '';
-        }
+      if (!wantSocials && (text || !html)) {
+        try { bodyText = await page.evaluate(() => document.body?.innerText || ''); } catch {}
       }
 
+      // после bodyHtml/bodyText - до return:
       const title = await page.title().catch(() => '');
+
+      // заголовки ответа
       const headersObj = {};
       if (resp) {
         try {
@@ -239,33 +243,28 @@ async function browserFetch(opts) {
           }
         } catch {}
       }
+
+      // куки из контекста
       const cookiesOut = await context.cookies().catch(() => []);
 
+      // антибот/CF телеметрия
       const antiBot = await detectAntiBot(page, resp);
 
+      // тайминги
       const timing = {
         startedAt,
         finishedAt: Date.now(),
         ms: Date.now() - startedAt,
       };
 
-      // итоговый json: совместим с Python-экстрактором
       return {
-        ok,
-        status,
-        url,
-        finalUrl,
-        title,
-        html: bodyHtml,
-        text: bodyText,
-        headers: headersObj,
-        cookies: cookiesOut,
-        console: consoleLogs,
-        timing,
-        antiBot,
-        websiteURL: url,
-        ...socials,
+        ok, status, url, finalUrl, title,
+        html: bodyHtml, text: bodyText,
+        headers: headersObj, cookies: cookiesOut,
+        console: consoleLogs, timing, antiBot,
+        websiteURL: url, ...socials,
       };
+
     } finally {
       try { await page?.close(); } catch {}
       try { await context?.close(); } catch {}

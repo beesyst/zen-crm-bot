@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json as _json
 import re
 import traceback
 
@@ -35,6 +36,7 @@ from core.parser.youtube import (
     youtube_to_handle,
     youtube_watch_to_embed,
 )
+from core.paths import PROJECT_ROOT
 
 logger = get_logger("collector")
 
@@ -42,27 +44,29 @@ logger = get_logger("collector")
 # Основная точка: сбор main.json-подобной структуры по сайту
 def collect_main_data(website_url: str, main_template: dict, storage_path: str) -> dict:
     reset_verified_state(full=False)
+    _TMPL_PATH = PROJECT_ROOT / "core" / "templates" / "main_template.json"
+
+    with open(_TMPL_PATH, "r", encoding="utf-8") as _f:
+        _TEMPLATE_CANON = _json.load(_f)
+
+    _CANON_KEYS = list((_TEMPLATE_CANON.get("socialLinks") or {}).keys())
 
     main_data = copy.deepcopy(main_template) if isinstance(main_template, dict) else {}
-    social_keys = (
+
+    # юнион-ключи: из переданного шаблона ∪ из канонического
+    tmpl_keys = (
         list((main_template.get("socialLinks") or {}).keys())
         if isinstance(main_template, dict)
-        else [
-            "websiteURL",
-            "twitterURL",
-            "discordURL",
-            "githubURL",
-            "mediumURL",
-            "youtubeURL",
-            "telegramURL",
-            "documentURL",
-            "linkedinURL",
-            "redditURL",
-        ]
+        else []
     )
+    social_keys = list(dict.fromkeys([*tmpl_keys, *_CANON_KEYS]))
+
+    # инициализация блока socialLinks и обязательный websiteURL
+    website_url = force_https(website_url)
     main_data["socialLinks"] = {k: "" for k in social_keys}
     main_data["socialLinks"]["websiteURL"] = website_url
 
+    # остальные поля каркаса
     main_data.setdefault("name", "")
     main_data.setdefault("shortDescription", "")
     main_data.setdefault("contentMarkdown", "")
@@ -72,17 +76,22 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
     main_data["svgLogo"] = main_data.get("svgLogo", "")
 
     try:
-        # грузим главную страницу проекта
+        # грузим главную страницу проекта (auto: requests → при необходимости Playwright)
         html = fetch_url_html(website_url, prefer="auto")
 
-        # тянем первичные соцсети с главной
+        # первичные соцсети/доки с главной
         socials = extract_social_links(html, website_url, is_main_page=True)
         socials = normalize_socials(socials)
 
-        # переносим найденные соцсети в каркас
+        # перенос найденных соцсетей
         for k in social_keys:
             v = socials.get(k)
             if isinstance(v, str) and v.strip():
+                main_data["socialLinks"][k] = v.strip()
+        for k, v in (socials or {}).items():
+            if isinstance(v, str) and v.strip():
+                if k not in main_data["socialLinks"]:
+                    main_data["socialLinks"][k] = ""
                 main_data["socialLinks"][k] = v.strip()
 
         # разбор X/Twitter: выбор верифицированного, домерж из агрегатора, аватар
@@ -94,7 +103,7 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
         avatar_verified = ""
 
         try:
-            # выбираем "правильный" twitter из найденных кандидатов
+            # выбираем «правильный» twitter из найденных кандидатов
             res = select_verified_twitter(
                 found_socials=main_data["socialLinks"],
                 socials=socials,
@@ -120,7 +129,7 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
             if twitter_final:
                 main_data["socialLinks"]["twitterURL"] = twitter_final
 
-            # домерж соцсетей, полученных из агрегатора twitter'а
+            # домерж соцсетей, полученных из агрегатора твиттера
             for k, v in (enriched_from_agg or {}).items():
                 if k == "websiteURL" or not v:
                     continue
@@ -131,14 +140,14 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
             logger.warning("Twitter verification error: %s", e)
 
         try:
-            # BIO/аватар X + возможный агрегатор в био
+            # bio/аватар X + возможный линк-агрегатор в био
             bio = {}
             avatar_url = avatar_verified or ""
             need_bio_for_avatar = bool(
                 main_data["socialLinks"].get("twitterURL") and (not avatar_url)
             )
 
-            # подтащим display name из X (без запроса аватара)
+            # подтянем display name из X (без запроса аватара)
             twitter_display = ""
             if main_data["socialLinks"].get("twitterURL"):
                 try:
@@ -152,7 +161,7 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
                 except Exception:
                     twitter_display = ""
 
-            # если нужно — пробуем еще раз профиль для аватара
+            # если нужен аватар - повторим профиль с аватаром
             if need_bio_for_avatar:
                 try:
                     bio = (
@@ -164,7 +173,7 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
                 except Exception:
                     bio = {}
 
-            # собираем из BIO все встреченные ссылки + помечаем агрегатор
+            # cобираем из bio все встреченные ссылки + помечаем агрегатор
             aggregator_from_bio = ""
             mapping = {
                 "x.com": "twitterURL",
@@ -243,7 +252,7 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
                 if saved:
                     main_data["svgLogo"] = logo_filename
 
-            # имя проекта: берем с сайта; если пусто — пробуем display name из X
+            # имя проекта: берем с сайта; если пусто - пробуем display name из X
             try:
                 parsed_name = extract_project_name(
                     html, website_url, twitter_display_name=twitter_display
@@ -256,7 +265,7 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
         except Exception as e:
             logger.warning("Twitter BIO/avatar block failed: %s", e)
 
-        # YouTube: embed, handle, title (если есть)
+        # youtube: embed, handle, title (если есть)
         yt = main_data["socialLinks"].get("youtubeURL", "")
         if yt:
             try:

@@ -1,8 +1,9 @@
 fastapi
 uvicorn[standard]
 pydantic
-requests
-beautifulsoup4
+requests>=2.32.5
+urllib3>=2.5.0
+beautifulsoup4>=4.13.5
 lxml
 httpx
 jinja2
@@ -13,4 +14,4 @@ psycopg2-binary
 pyyaml
 python-dotenv
 python-json-logger
-python-multipart==0.0.20
+python-multipart>=0.0.20

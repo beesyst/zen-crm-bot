@@ -192,9 +192,6 @@ def _load_settings() -> dict:
 # Сервис: постройка команды docker compose с корректным набором файлов
 def compose_cmd(*args: str) -> list[str]:
     files = [DOCKER_DIR / "docker-compose.yml"]
-    override = DOCKER_DIR / "docker-compose.override.yml"
-    if override.exists():
-        files.append(override)
     return [
         "docker",
         "compose",
@@ -203,6 +200,59 @@ def compose_cmd(*args: str) -> list[str]:
         *[arg for f in files for arg in ("-f", str(f))],
         *args,
     ]
+
+
+# Чтение node_version из config/settings.yml
+def _read_node_version_from_settings() -> str:
+    s = _load_settings()
+    return (s.get("runtime", {}) or {}).get("node_version", "")
+
+
+# Одноразовая генерация core/node/package-lock.json на хосте
+def ensure_node_lockfile() -> tuple[bool, str]:
+    node_dir = ROOT / "core" / "node"
+    pkg = node_dir / "package.json"
+    lock = node_dir / "package-lock.json"
+
+    if not pkg.exists():
+        return True, "skip: core/node/package.json не найден"
+
+    need_regen = True
+    if lock.exists() and lock.stat().st_size > 0:
+        # перегенерируем, только если package.json новее lockfile
+        need_regen = pkg.stat().st_mtime > lock.stat().st_mtime
+
+    if not need_regen:
+        return True, "ok: package-lock.json актуален"
+
+    node_ver = _read_node_version_from_settings() or os.environ.get("NODE_VERSION", "")
+    if not node_ver:
+        return False, "runtime.node_version не задан в config/settings.yml"
+
+    image = f"node:{node_ver}-alpine"
+
+    cmd = [
+        "docker",
+        "run",
+        "--rm",
+        "-v",
+        f"{str(node_dir)}:/work",
+        "-w",
+        "/work",
+        image,
+        "sh",
+        "-lc",
+        # только lockfile, без postinstall-скриптов
+        "npm install --package-lock-only --no-audit --no-fund --ignore-scripts",
+    ]
+    rc, _ = run_and_capture(cmd)
+    if rc == 0 and lock.exists() and lock.stat().st_size > 0:
+        return True, (
+            "created: package-lock.json"
+            if lock.stat().st_mtime >= pkg.stat().st_mtime
+            else "updated: package-lock.json"
+        )
+    return False, f"npm lock generation failed (rc={rc})"
 
 
 # Сервис: форматирование суффикса версии/баннера из stdout
@@ -218,7 +268,7 @@ def _suffix(out: str, expected_prefix: str) -> str:
 def check_required_files():
     req = ROOT / "requirements.txt"
     if not req.exists():
-        print("[error] requirements.txt отсутствует (zen-crm/requirements.txt).")
+        print("[error] requirements.txt отсутствует (в корне проекта).")
         sys.exit(1)
 
 
@@ -407,13 +457,19 @@ def _pipeline_up(*, detached: bool, run_modes: bool) -> int:
     redis_image = os.environ.get("REDIS_IMAGE", "redis:latest")
 
     def _prep_docker():
-        # все пишем в setup.log, step только рисует спиннер/итог
-        rc1 = sh_log_setup(compose_cmd("pull", "redis", "db"), cwd=DOCKER_DIR)
-        rc2 = sh_log_setup(compose_cmd("build"), cwd=DOCKER_DIR)
+        # если образ приложения отсутствует - собрать; иначе сразу up
+        expected = _app_image_tag()
+        rc_inspect, _ = run_and_capture(["docker", "image", "inspect", expected])
+
+        if rc_inspect != 0:
+            # образа нет - один раз собираем
+            rc_build = sh_log_setup(compose_cmd("build"), cwd=DOCKER_DIR)
+            if rc_build != 0:
+                return False, "build failed"
+
         args = ["up", "-d"] if detached else ["up"]
-        rc3 = sh_log_setup(compose_cmd(*args), cwd=DOCKER_DIR)
-        rc = 0 if (rc1 == 0 and rc2 == 0 and rc3 == 0) else 1
-        return (rc == 0), ("" if rc == 0 else "failed")
+        rc_up = sh_log_setup(compose_cmd(*args), cwd=DOCKER_DIR)
+        return (rc_up == 0), ("" if rc_up == 0 else "failed")
 
     step("Docker (pull/build/up)", _prep_docker)
 
@@ -572,8 +628,8 @@ def _pipeline_up(*, detached: bool, run_modes: bool) -> int:
     return 0
 
 
-# Команда: локальный запуск в форграунде (build + up)
-def cmd_dev():
+# Общий раннер для оберткки
+def _run_stack(*, detached: bool, run_modes: bool) -> None:
     print("Start")
     check_required_files()
     _maybe_clear_logs_once()
@@ -583,44 +639,26 @@ def cmd_dev():
     _export_compose_env()
     sync_env_from_settings()
     check_prereqs(require_postgres=False)
+    step("package-lock.json", ensure_node_lockfile)
 
-    rc = _pipeline_up(detached=False, run_modes=False)
-    print("Finish" if rc == 0 else "Finish (with errors - see logs/setup.log)")
+    rc = _pipeline_up(detached=detached, run_modes=run_modes)
+    print("Finish" if rc == 0 else "Finish (with errors — see logs/setup.log)")
     sys.exit(rc)
+
+
+# Команда: локальный запуск в форграунде (build + up)
+def cmd_dev():
+    _run_stack(detached=False, run_modes=False)
 
 
 # Команада: локальный запуск в фоне (build + up -d)
 def cmd_dev_bg():
-    print("Start")
-    check_required_files()
-    _maybe_clear_logs_once()
-    ensure_files()
-    generate_settings_example()
-    render_node_package_json()
-    _export_compose_env()
-    sync_env_from_settings()
-    check_prereqs(require_postgres=False)
-
-    rc = _pipeline_up(detached=True, run_modes=True)
-    print("Finish" if rc == 0 else "Finish (with errors — see logs/setup.log)")
-    sys.exit(rc)
+    _run_stack(detached=True, run_modes=True)
 
 
 # Команада: продовый запуск в фоне (build + up -d)
 def cmd_prod_up():
-    print("Start")
-    check_required_files()
-    _maybe_clear_logs_once()
-    ensure_files()
-    generate_settings_example()
-    render_node_package_json()
-    _export_compose_env()
-    sync_env_from_settings()
-    check_prereqs(require_postgres=False)
-
-    rc = _pipeline_up(detached=True, run_modes=True)
-    print("Finish" if rc == 0 else "Finish (with errors — see logs/setup.log)")
-    sys.exit(rc)
+    _run_stack(detached=True, run_modes=True)
 
 
 # Команада: разовый запуск research CLI внутри job-контейнера

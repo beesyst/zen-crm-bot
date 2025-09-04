@@ -110,7 +110,6 @@ zen-crm-bot/
 ├── db/                              # Заглушка под миграции и SQL (если потребуется)
 │
 ├── docker/                          # Docker-инфраструктура
-│   ├── docker-compose.override.yml  # Локальные оверрайды (порты/volume/режимы)
 │   ├── docker-compose.yml           # Основной стек: api/worker/beat/db/redis/job
 │   └── Dockerfile                   # Образ приложения (многостейдж)
 │

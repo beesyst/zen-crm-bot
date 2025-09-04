@@ -17,6 +17,11 @@ logger = get_logger("web")
 _FETCHED_HTML_CACHE: dict[str, str] = {}
 _DOCS_LOGGED: set[str] = set()
 
+UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
 
 # Нормализованный хост из URL
 def _host(u: str) -> str:
@@ -30,10 +35,22 @@ def _host(u: str) -> str:
 def is_html_suspicious(html: str) -> bool:
     if not html:
         return True
+
+    # если это json от браузера с полями ok/html/text - не считаем подозрительными
+    try:
+        j = json.loads(html)
+        if isinstance(j, dict) and ("html" in j or "text" in j):
+            return False
+    except Exception:
+        pass
+
     low = html.lower()
+
+    # антибот/CF
     if any(
         s in low
         for s in (
+            "cf-browser-verification",
             "cloudflare",
             "cf-challenge",
             "verifying you are human",
@@ -42,14 +59,18 @@ def is_html_suspicious(html: str) -> bool:
         )
     ):
         return True
-    # типичные маркеры spa/гидратации
-    if any(
+
+    # spa-маркеры сами по себе - не повод паниковать, просто триггер попробовать браузер
+    spa_marker = any(
         s in low
         for s in ('id="__next"', "data-reactroot", "ng-version", "vite", "data-radix-")
-    ):
+    )
+    if spa_marker and len(html) < 2500 and not has_social_links(html):
         return True
-    if len(html) < 3000 and not has_social_links(html):
+
+    if len(html) < 2000 and not has_social_links(html):
         return True
+
     return False
 
 
@@ -60,10 +81,16 @@ def has_social_links(html: str) -> bool:
         "twitter.com",
         "x.com",
         "discord.gg",
+        "discord.com",
         "t.me",
         "telegram.me",
         "github.com",
         "medium.com",
+        "youtube.com",
+        "youtu.be",
+        "linkedin.com",
+        "lnkd.in",
+        "reddit.com",
     ):
         if dom in low:
             return True
@@ -71,16 +98,13 @@ def has_social_links(html: str) -> bool:
 
 
 # Вызов Node-скрипта (Playwright) для получения HTML
-def _browser_fetch(
-    path_js: str, url: str, timeout: int = 60, wait: str = "networkidle"
-) -> dict:
+def _browser_fetch(path_js, url, timeout=60, wait="networkidle", mode="html") -> dict:
     try:
         args = [
             "node",
             path_js,
             "--url",
             url,
-            "--html",
             "--wait",
             wait,
             "--timeout",
@@ -88,6 +112,11 @@ def _browser_fetch(
             "--retries",
             "2",
         ]
+        if mode == "html":
+            args.append("--html")
+        elif mode == "socials":
+            args.append("--socials")
+
         res = subprocess.run(
             args,
             cwd=os.path.dirname(path_js),
@@ -106,11 +135,9 @@ def _browser_fetch(
 
 
 # Получить HTML через Playwright (если нужен JS)
-def fetch_url_html_playwright(
-    url: str, timeout: int = 60, wait: str = "networkidle"
-) -> str:
+def fetch_url_html_playwright(url, timeout=60, wait="networkidle", mode="html") -> str:
     script_path = os.path.join(os.path.dirname(__file__), "browser_fetch.js")
-    res = _browser_fetch(script_path, url, timeout=timeout, wait=wait)
+    res = _browser_fetch(script_path, url, timeout=timeout, wait=wait, mode=mode)
     try:
         return json.dumps(res, ensure_ascii=False)
     except Exception:
@@ -136,7 +163,7 @@ def fetch_url_html(url: str, *, prefer: str = "auto", timeout: int = 30) -> str:
             r = requests.get(
                 url,
                 timeout=timeout,
-                headers={"User-Agent": "Mozilla/5.0"},
+                headers={"User-Agent": UA},
                 allow_redirects=True,
             )
             html = r.text or ""
@@ -147,7 +174,7 @@ def fetch_url_html(url: str, *, prefer: str = "auto", timeout: int = 30) -> str:
         return html
 
     if prefer == "browser":
-        out = fetch_url_html_playwright(url)
+        out = fetch_url_html_playwright(url, mode="html")
         _FETCHED_HTML_CACHE[url] = out
         return out
 
@@ -156,9 +183,7 @@ def fetch_url_html(url: str, *, prefer: str = "auto", timeout: int = 30) -> str:
         r = requests.get(
             url,
             timeout=timeout,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari"
-            },
+            headers={"User-Agent": UA},
             allow_redirects=True,
         )
         html = r.text or ""
@@ -167,9 +192,30 @@ def fetch_url_html(url: str, *, prefer: str = "auto", timeout: int = 30) -> str:
 
     # если соцлинков нет - пробуем Playwright (spa футеры, гидратация)
     if (not html) or (not has_social_links(html)) or is_html_suspicious(html):
+        # html рендером
         out = fetch_url_html_playwright(
-            url, timeout=max(60, timeout), wait="domcontentloaded"
+            url, timeout=max(60, timeout), wait="networkidle", mode="html"
         )
+        if (not out) or is_html_suspicious(out):
+            out = fetch_url_html_playwright(
+                url, timeout=max(60, timeout), wait="domcontentloaded", mode="html"
+            )
+
+        # если в dom по-прежнему пусто - просим соц-JSON
+        try:
+            parsed = json.loads(out or "{}")
+        except Exception:
+            parsed = {}
+        need_socials = True
+        if isinstance(parsed, dict):
+            dom = parsed.get("html") or parsed.get("text") or ""
+            if dom and has_social_links(dom):
+                need_socials = False
+        if need_socials:
+            out = fetch_url_html_playwright(
+                url, timeout=max(60, timeout), wait="networkidle", mode="socials"
+            )
+
         _FETCHED_HTML_CACHE[url] = out or html
         return _FETCHED_HTML_CACHE[url]
 
@@ -219,7 +265,7 @@ def find_best_docs_link(soup: BeautifulSoup, base_url: str) -> str:
         try:
             resp = requests.get(
                 url,
-                headers={"User-Agent": "Mozilla/5.0"},
+                headers={"User-Agent": UA},
                 timeout=12,
                 allow_redirects=True,
             )
@@ -318,15 +364,15 @@ def find_best_docs_link(soup: BeautifulSoup, base_url: str) -> str:
 
 # Парс соцсетей и docs из HTML сайта
 def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -> dict:
-    # если это json соцлинков (browser_fetch в «соц»-режиме) - вернуть как есть
+    # если прилетел соц-json - вернем его как есть
     try:
         j = json.loads(html or "")
-        if isinstance(j, dict) and "websiteURL" in j:
+        if isinstance(j, dict) and j.get("websiteURL"):
             for k, v in list(j.items()):
                 if isinstance(v, str):
                     j[k] = force_https(v)
             return j
-        # если это json-пакет браузера (ok/status/html/...) - извлечь html и продолжить как с обычным HTML
+        # если это пакет {ok, html|text, ...} - вытянем html и продолжим
         if isinstance(j, dict) and ("html" in j or "text" in j):
             html = j.get("html") or j.get("text") or ""
     except Exception:
@@ -387,29 +433,32 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
     if is_main_page and all(
         not links[k] for k in links if k not in ("websiteURL", "documentURL")
     ):
-        payload = fetch_url_html_playwright(base_url, timeout=60, wait="domcontentloaded")
+        logger.info("browser_fetch socials fallback: %s", base_url)
+        payload = fetch_url_html_playwright(
+            base_url, timeout=60, wait="networkidle", mode="socials"
+        )
         try:
-            j2 = json.loads(payload or "")
+            j2 = json.loads(payload or "") or {}
         except Exception:
             j2 = {}
-
-        # вариант A: browser_fetch вернул сразу соц-JSON
         if isinstance(j2, dict) and j2.get("websiteURL"):
             for k, v in list(j2.items()):
                 if isinstance(v, str):
                     j2[k] = force_https(v)
             return j2
 
-        # вариант B: browser_fetch вернул пакет с html/ text → парсим html как обычно
+        # если соц-json не пришел - второй круг по dom из браузера
         if isinstance(j2, dict) and ("html" in j2 or "text" in j2):
             html2 = j2.get("html") or j2.get("text") or ""
             if html2:
                 soup2 = BeautifulSoup(html2, "html.parser")
 
-                # приоритетные зоны (footer/social/role=contentinfo)
                 zones2 = []
+                zones2.extend(soup2.select("header, header *, nav, nav *"))
                 zones2.extend(soup2.select("footer, footer *"))
-                zones2.extend(soup2.select("[role='contentinfo'], [role='contentinfo'] *"))
+                zones2.extend(
+                    soup2.select("[role='contentinfo'], [role='contentinfo'] *")
+                )
                 zones2.extend(
                     soup2.select(
                         "[class*='social'], [class*='footer'], [class*='follow'], [data-testid*='footer']"
@@ -437,7 +486,9 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
                     _scan2(z)
 
                 if all(
-                    not links[k] for k in links if k not in ("websiteURL", "documentURL")
+                    not links[k]
+                    for k in links
+                    if k not in ("websiteURL", "documentURL")
                 ):
                     for a in soup2.find_all("a", href=True):
                         href = urljoin(base_url, a["href"])

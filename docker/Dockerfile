@@ -46,10 +46,28 @@ ENV PATH="/usr/local/node/bin:${PATH}"
 
 WORKDIR /app
 
-# deps: только Python (кеш pip оставляем)
+# deps: только Python
 FROM base AS deps
 COPY requirements.txt .
 RUN pip install -r requirements.txt
+
+# deps-npm: node_modules + playwright (кэшируемый слой)
+FROM base AS deps-npm
+WORKDIR /app/core/node
+# Копируем только package.json (+ lock если есть) — это ключ к стабильному кэшу npm
+COPY core/node/package.json core/node/package-lock.json* ./
+# Если есть package-lock.json → npm ci, иначе → npm install
+RUN if [ -f package-lock.json ]; then \
+      npm ci --omit=dev --no-audit --no-fund; \
+    else \
+      npm install --omit=dev --no-audit --no-fund; \
+    fi
+
+# Установка браузеров (кэш вместе с node_modules)
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN mkdir -p /ms-playwright && \
+    ./node_modules/.bin/playwright --version && \
+    ./node_modules/.bin/playwright install chromium
 
 # runtime: финальный образ
 FROM base AS runtime
@@ -57,30 +75,20 @@ FROM base AS runtime
 # Python deps
 COPY --from=deps /usr/local /usr/local
 
-# Проектный код
+# Node deps и браузеры из кэшируемого слоя
+COPY --from=deps-npm /app/core/node /app/core/node
+COPY --from=deps-npm /ms-playwright /ms-playwright
+
+# Проектный код - копируем после deps, чтобы правки кода не ломали кэш npm/playwright
 WORKDIR /app
 COPY . /app
 
-# Node зависимости ставим В ФИНАЛЬНОМ СЛОЕ
-WORKDIR /app/core/node
-RUN if [ -f package-lock.json ]; then \
-      npm ci --omit=dev --no-audit --no-fund; \
-    else \
-      npm install --omit=dev --no-audit --no-fund; \
-    fi
-
-# Установка браузеров из локального пакета Playwright
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-RUN mkdir -p /ms-playwright && \
-    ./node_modules/.bin/playwright --version && \
-    ./node_modules/.bin/playwright install chromium
-
-# Настройка PATH так, чтобы bin-ы были видны
-WORKDIR /app
+# Настройка PATH/ENV
 ENV NODE_PATH=/app/core/node/node_modules
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ENV PATH="/app/core/node/node_modules/.bin:/usr/local/node/bin:${PATH}"
 
-# Шорткат на бинарь
+# Шорткат на бинарь playwright
 RUN ln -sf /app/core/node/node_modules/.bin/playwright /usr/local/bin/playwright
 
 # Профиль login-shell, чтобы PATH/переменные не терялись
@@ -100,4 +108,3 @@ FROM runtime AS api
 FROM runtime AS worker
 FROM runtime AS beat
 FROM runtime AS job
-
