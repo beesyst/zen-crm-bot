@@ -21,14 +21,15 @@ infra:
 crm:
   provider: "kommo"
   kommo:
-    base_url: "https://beesyst.kommo.com/"
+    base_url: "https://officenodersteam.kommo.com/"
     access_token: "PASTE_TOKEN"       # секрет редактируется
-    secret_key: "NJqKZvJrmCaTKswdaf6QaFUUgaAQB3NjlVp8pKCU49PKAwc1jx7fNv9eDdvg3uUa"
-    integration_id: "d4c70e79-632e-4fb5-a8c1-c4caa18e511d"
+    secret_key: "Nr7KQdR7WORUyw8ShYHvstH8FGCAHKJDhIfZU6zQiQLsDb9ycY7tLKLxOpRztuxA"
+    integration_id: "984f9863-f55c-475b-a3aa-18afd34bbde2"
     stages_map: "config/stages.map.json"
     # Произвольные поля и режимы — тянем как есть, если юзер их добавил в settings.yml.
-    fields: {address: 195002, docs: 1048046, email: null, linkedin: 1047984, medium: 1315150,
-  phone: null, reddit: 1047994, telegram: 1047992, web: 787593, x: 954860, youtube: 1048044}
+    fields: {address: 195002, discord: 1113985, docs: 1113191, email: null, fund: 1113987, linkedin: 1113201,
+  medium: 1113983, phone: null, reddit: 1113195, telegram: 1113197, web: 195000, x: 1113199,
+  youtube: 1113193}
     safe_mode:
       dry_run: false
 ...

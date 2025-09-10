@@ -51,14 +51,15 @@ class KommoAdapter:
 
     # http
     def _req(self, method: str, path: str, **kw) -> Any:
-        url = f"{self.base}{path}"
-        log.info("HTTP %s %s", method, path)
+        url = path if str(path).startswith("http") else f"{self.base}{path}"
+        params = kw.get("params")
+        # пишем и URL, и params
+        log.info("HTTP %s %s params=%s", method, url, params)
         resp = requests.request(method, url, headers=self.headers, timeout=30, **kw)
-        log.info("HTTP %s %s -> %s", method, path, resp.status_code)
+        log.info("HTTP %s %s -> %s", method, url, resp.status_code)
         if resp.status_code >= 400:
-            # не падаем без логов: поможет диагностировать неправильные id полей/стадий
             body = resp.text[:500].replace("\n", " ")
-            log.error("kommo %s %s -> %s %s", method, path, resp.status_code, body)
+            log.error("kommo %s %s -> %s %s", method, url, resp.status_code, body)
             raise RuntimeError(f"Kommo API error {resp.status_code}")
         return resp.json() if resp.text.strip() else {}
 
@@ -169,30 +170,33 @@ class KommoAdapter:
             t.get("name", "") for t in (company.get("_embedded", {}).get("tags") or [])
         ]
 
-    # постраничный обход компаний с вытаскиванием custom_fields и tags
-    def iter_companies(self, page_size: int = 250):
-        page = 1
-        while True:
-            params = {
-                "page": page,
-                "limit": page_size,
-                "with": "custom_fields,contacts",
-            }
-            data = self._req("GET", "/api/v4/companies", params=params) or {}
-            items = (data.get("_embedded") or {}).get("companies") or []
-            if not items:
-                break
-            # подтягиваем теги отдельным запросом
-            for it in items:
-                try:
-                    tags = (
-                        self._req("GET", f"/api/v4/companies/{it['id']}") or {}
-                    ).get("_embedded", {}).get("tags") or []
-                    it.setdefault("_embedded", {}).setdefault("tags", tags)
-                except Exception:
-                    pass
-                yield it
-            page += 1
+    # Резолв имен тегов (companies) в ID через /api/v4/tags
+    def resolve_tag_ids(self, names: list[str]) -> list[int]:
+        out: list[int] = []
+        for name in names or []:
+            q = (name or "").strip()
+            if not q:
+                continue
+            params = {"filter[entity_type]": "companies", "query": q, "limit": 50}
+            url = "/api/v4/tags"
+            # идем по страницам, пока не найдем точное совпадение
+            while url:
+                data = (
+                    self._req(
+                        "GET", url, params=params if str(url).startswith("/") else None
+                    )
+                    or {}
+                )
+                for t in (data.get("_embedded") or {}).get("tags") or []:
+                    tname = (t.get("name") or "").strip()
+                    if tname.lower() == q.lower() and t.get("id"):
+                        out.append(int(t["id"]))
+                        url = None
+                        break
+                if url:
+                    next_link = (data.get("_links") or {}).get("next", {}).get("href")
+                    url, params = (next_link, None) if next_link else (None, None)
+        return out
 
     # сайт компании из custom_fields / верхнего уровня
     def get_company_web(self, company: Dict[str, Any]) -> str:
@@ -231,17 +235,42 @@ class KommoAdapter:
         # фолбэк - поле верхнего уровня
         return (company.get("website") or "").strip()
 
-    # фильтрация компаний по тегам (на своей стороне)
-    def find_companies_by_tags(self, tags: list[str]) -> list[Dict[str, Any]]:
-        want = {t.strip().lower() for t in (tags or []) if t.strip()}
-        out: list[Dict[str, Any]] = []
-        for c in self.iter_companies():
-            tags_emb = (c.get("_embedded") or {}).get("tags") or []
-            got = {
-                (t.get("name") or "").strip().lower()
-                for t in tags_emb
-                if isinstance(t, dict)
-            }
-            if want & got:
-                out.append(c)
-        return out
+    # Серверная фильтрация
+    def iter_companies_by_tag_ids(
+        self,
+        tag_ids: list[int],
+        limit: int = 250,
+    ):
+        if not tag_ids:
+            return
+        url = "/api/v4/companies"
+        lim = max(1, min(int(limit or 250), 250))
+        params = [
+            ("limit", str(lim)),
+            ("with", "custom_fields,contacts,tags"),
+            ("filter[tags_logic]", "or"),
+            ("useFilter", "y"),
+        ]
+        # как в UI: filter[tags][]=157965 (повторяем ключ для каждого id)
+        for tid in tag_ids:
+            params.append(("filter[tags][]", str(tid)))
+
+        while url:
+            data = (
+                self._req(
+                    "GET", url, params=params if str(url).startswith("/") else None
+                )
+                or {}
+            )
+            items = (data.get("_embedded") or {}).get("companies") or []
+
+            # клиентская проверка на всякий случай (без доп. запросов)
+            required = set(int(x) for x in (tag_ids or []))
+            for it in items:
+                tags = ((it.get("_embedded") or {}).get("tags")) or []
+                have = {int(t["id"]) for t in tags if t.get("id")}
+                if have & required:
+                    yield it
+
+            next_link = (data.get("_links") or {}).get("next", {}).get("href")
+            url, params = (next_link, None) if next_link else (None, None)

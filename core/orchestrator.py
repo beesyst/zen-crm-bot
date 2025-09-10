@@ -83,7 +83,16 @@ def run_research_pipeline(options: OrchestratorOptions | None = None) -> None:
         finish()
         return
 
-    sites = list(_take_limit(sites, opts.limit))
+    mode_cfg = settings.get("modes", {}).get("research_and_intake", {}) or {}
+    mode_limit = int(mode_cfg.get("limit")) if mode_cfg.get("limit") else None
+    rate_limit_cfg = float(mode_cfg.get("rate_limit_sec") or 0)
+
+    # приоритет: CLI-опции > конфиг
+    effective_limit = opts.limit if (opts.limit and opts.limit > 0) else mode_limit
+    if opts.rate_limit_sec <= 0 and rate_limit_cfg > 0:
+        opts.rate_limit_sec = rate_limit_cfg
+
+    sites = list(_take_limit(sites, effective_limit))
     processed_total = 0
 
     # подключаем CRM адаптер
@@ -140,27 +149,52 @@ def run_enrich_pipeline(options: OrchestratorOptions | None = None) -> None:
     opts = options or OrchestratorOptions()
     settings = _load_settings()
 
-    # режим выключен - коротко в терминал, чисто в host.log
     if not settings.get("modes", {}).get("enrich_existing", {}).get("enabled", False):
         skip("enrich", "disabled in settings.yml")
         _log.info("enrich отключён в settings.yml")
         return
 
-    crm = KommoAdapter()
-    tags = settings["modes"]["enrich_existing"].get("tag_process", ["new"])
-    companies = crm.find_companies_by_tags(tags)
+    mode_cfg = settings.get("modes", {}).get("enrich_existing", {}) or {}
+    tag_ids = list(mode_cfg.get("tag_id") or [])
+    tag_names = list(mode_cfg.get("tag_process") or [])
 
-    # старт пайплайна: только терминал
+    # конфигурируемые параметры режима
+    page_size = int(mode_cfg.get("page_size") or 250)
+    mode_limit = int(mode_cfg.get("limit")) if mode_cfg.get("limit") else None
+    rate_limit_cfg = float(mode_cfg.get("rate_limit_sec") or 0)
+
+    # приоритет: CLI-опции > конфиг
+    effective_limit = opts.limit if (opts.limit and opts.limit > 0) else mode_limit
+    if opts.rate_limit_sec <= 0 and rate_limit_cfg > 0:
+        opts.rate_limit_sec = rate_limit_cfg
+
+    # инициализируем адаптер
+    crm = KommoAdapter()
+
+    # если tag_id пуст - резолвим по именам из tag_process
+    if not tag_ids and tag_names:
+        tag_ids = crm.resolve_tag_ids(tag_names)
+
+    # если и после резолва пусто - корректно выходим
+    if not tag_ids:
+        skip("enrich", "нет tag_id (проверь modes.enrich_existing.tag_id/tag_process)")
+        _log.info("enrich: пустой список tag_id")
+        ok("total: 0")
+        finish()
+        return
+
     ok("start enrich")
 
+    companies = list(crm.iter_companies_by_tag_ids(tag_ids, limit=page_size))
+
     if not companies:
-        # ничего не обогащаем: терминал + финальная строка в host.log без префиксов
         ok("total: 0")
         _log.info("enrich: 0 companies")
         finish()
         return
 
-    companies = list(_take_limit(companies, opts.limit))
+    # ограничение итогового набора по effective_limit (если задан)
+    companies = list(_take_limit(companies, effective_limit))
 
     processed_total = 0
 

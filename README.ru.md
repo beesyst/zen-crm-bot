@@ -270,9 +270,3 @@ bash start.sh
     - `docker compose run --rm job python -m cli.research`
     - `docker compose run --rm job python -m cli.enrich`
   - Не имеет healthcheck/автоперезапуска, завершается по окончании команды.
-
-
-
-
-
-
