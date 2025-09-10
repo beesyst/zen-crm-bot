@@ -220,14 +220,14 @@ async function browserFetch(opts) {
       }
 
       // для обратной совместимости возвращаем еще и html/text (если запрошено)
-      const wantSocials = !!opts.socials;
       let bodyHtml = null;
       let bodyText = null;
 
-      if (!wantSocials && html) {
+      // всегда возвращаем HTML для пост-обработки (в т.ч. когда --socials)
+      if (html || opts.socials) {
         try { bodyHtml = await page.content(); } catch {}
       }
-      if (!wantSocials && (text || !html)) {
+      if (text || (!html && !opts.socials)) {
         try { bodyText = await page.evaluate(() => document.body?.innerText || ''); } catch {}
       }
 

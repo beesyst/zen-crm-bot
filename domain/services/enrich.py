@@ -85,10 +85,13 @@ def _plan_updates(
         "web": socials.get("websiteURL") or "",
         "docs": socials.get("documentURL") or "",
         "x": socials.get("twitterURL") or "",
+        "discord": socials.get("discordURL") or "",
+        "github": socials.get("githubURL") or "",
         "linkedin": socials.get("linkedinURL") or "",
         "telegram": socials.get("telegramURL") or "",
         "reddit": socials.get("redditURL") or "",
         "youtube": socials.get("youtubeURL") or "",
+        "medium": socials.get("mediumURL") or "",
     }
 
     current = _current_cf(company)

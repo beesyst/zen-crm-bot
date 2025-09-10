@@ -241,7 +241,16 @@ def find_best_docs_link(soup: BeautifulSoup, base_url: str) -> str:
     def _is_good_text(txt: str) -> bool:
         low = (txt or "").strip().lower()
         return any(
-            k in low for k in ("docs", "documentation", "developer docs", "developers")
+            k in low
+            for k in (
+                "docs",
+                "documentation",
+                "developer docs",
+                "developers",
+                "developer",
+                "build",
+                "build with",
+            )
         )
 
     # отсеиваем API-списки и специфичные разделы, которые обычно не являются "главной" докой
@@ -262,6 +271,29 @@ def find_best_docs_link(soup: BeautifulSoup, base_url: str) -> str:
 
     # проверяем, что url отдает 200 и выглядит как документация
     def _verify_docs(url: str) -> bool:
+        def _ok_by_hints(html: str) -> bool:
+            html = (html or "")[:200_000].lower()
+            if "404" in html and ("not found" in html or "page not found" in html):
+                return False
+            doc_hints = (
+                "docs",
+                "documentation",
+                "sidebar",
+                "docusaurus",
+                "mkdocs",
+                "readthedocs",
+                "vuepress",
+                "vitepress",
+                "table-of-contents",
+                "toc__",
+                "navitems",
+                "md-content",
+                "md-sidebar",
+                "docsearch",
+            )
+            return sum(1 for k in doc_hints if k in html) >= 2
+
+        # requests
         try:
             resp = requests.get(
                 url,
@@ -269,37 +301,23 @@ def find_best_docs_link(soup: BeautifulSoup, base_url: str) -> str:
                 timeout=12,
                 allow_redirects=True,
             )
+            if resp.status_code == 200 and _ok_by_hints(resp.text or ""):
+                return True
+        except Exception:
+            pass
+
+        # фолбэк: playwright (если Cloudflare/SPA/редиректы мешают)
+        try:
+            payload = fetch_url_html_playwright(
+                url, timeout=60, wait="domcontentloaded", mode="html"
+            )
+            j = json.loads(payload or "") if payload else {}
+            dom = ""
+            if isinstance(j, dict):
+                dom = j.get("html") or j.get("text") or ""
+            return bool(dom and _ok_by_hints(dom))
         except Exception:
             return False
-
-        if resp.status_code != 200:
-            return False
-
-        html = (resp.text or "")[:200_000].lower()
-
-        # не 404/ошибка
-        if "404" in html and ("not found" in html or "page not found" in html):
-            return False
-
-        # сигнатуры движков/шаблонов документации
-        doc_hints = (
-            "docs",
-            "documentation",
-            "sidebar",
-            "docusaurus",
-            "mkdocs",
-            "readthedocs",
-            "vuepress",
-            "vitepress",
-            "table-of-contents",
-            "toc__",
-            "navitems",
-            "md-content",
-            "md-sidebar",
-            "docsearch",
-        )
-        hits = sum(1 for k in doc_hints if k in html)
-        return hits >= 2
 
     # собираем явные кандидаты со страницы
     explicit_candidates: list[str] = []
@@ -441,11 +459,29 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
             j2 = json.loads(payload or "") or {}
         except Exception:
             j2 = {}
+
         if isinstance(j2, dict) and j2.get("websiteURL"):
             for k, v in list(j2.items()):
                 if isinstance(v, str):
                     j2[k] = force_https(v)
-            return j2
+
+            # мержим найденные соцсети в текущий словарь links
+            for k in list(links.keys()):
+                if k in j2 and j2[k] and not links.get(k):
+                    links[k] = j2[k]
+
+            # пытаемся вычислить документaцию: сперва из html/text, затем - по эвристикам (docs.<host>, /docs)
+            html2 = j2.get("html") or j2.get("text") or ""
+            soup2 = (
+                BeautifulSoup(html2, "html.parser")
+                if html2
+                else BeautifulSoup("", "html.parser")
+            )
+            doc2 = find_best_docs_link(soup2, base_url)
+            if doc2 and not links.get("documentURL"):
+                links["documentURL"] = doc2
+
+            return links
 
         # если соц-json не пришел - второй круг по dom из браузера
         if isinstance(j2, dict) and ("html" in j2 or "text" in j2):
