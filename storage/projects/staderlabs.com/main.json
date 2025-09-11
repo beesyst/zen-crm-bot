@@ -1,0 +1,25 @@
+{
+  "name": "Stader Labs",
+  "socialLinks": {
+    "websiteURL": "https://www.staderlabs.com",
+    "twitterURL": "https://x.com/staderlabs",
+    "discordURL": "https://discord.com/invite/xJURAhSmav",
+    "githubURL": "https://github.com/stader-labs",
+    "mediumURL": "",
+    "youtubeURL": "",
+    "telegramURL": "https://t.me/staderlabs",
+    "documentURL": "https://www.staderlabs.com/docs",
+    "linkedinURL": "",
+    "redditURL": "https://www.reddit.com/r/StaderLabs_Official"
+  },
+  "contacts": {
+    "contactEmail": "",
+    "contactFormURL": ""
+  },
+  "shortDescription": "",
+  "contentMarkdown": "",
+  "seo": {},
+  "coinData": {},
+  "videoSlider": [],
+  "svgLogo": "staderlabs.jpg"
+}

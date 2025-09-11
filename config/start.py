@@ -96,60 +96,114 @@ def sh_log_host(cmd: list[str], cwd: Path | None = None, echo: bool = False) -> 
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        bufsize=1,
+        bufsize=0,
     )
 
     with open(host_log_path, "a", encoding="utf-8") as host_log_file:
-        for raw in proc.stdout or []:
-            # первичная нормализация
-            line = raw.rstrip("\n")
-            if not line:
-                continue
+        buf = ""
+        try:
+            while True:
+                ch = proc.stdout.read(1) if proc.stdout else ""
+                if ch == "" and proc.poll() is not None:
+                    # процесс завершился, дольем хвост буфера
+                    if buf.strip():
+                        line = ansi_re.sub("", buf)
+                        if ts_log_re.match(line):
+                            host_log_file.write(line + "\n")
+                            host_log_file.flush()
+                        elif console_marker_re.match(line):
+                            if echo:
+                                print(line)
+                        elif spinner_frame_re.match(line):
+                            if echo:
+                                sys.stdout.write(line + "\r")
+                                sys.stdout.flush()
+                        else:
+                            host_log_file.write(line + "\n")
+                            host_log_file.flush()
+                            if echo:
+                                print(line)
+                    break
 
-            # удалить CR (кадры спиннера печатаются с '\r') и ANSI ESC-последовательности
-            line = ansi_re.sub("", line)
+                if ch == "":
+                    # процесс еще жив, но данных нет - продолжим цикл
+                    continue
 
-            if not line:
-                continue
+                if ch == "\r":
+                    # кадр спиннера/прогресса (без \n)
+                    frame = ansi_re.sub("", buf)
+                    buf = ""
+                    if not frame.strip():
+                        continue
+                    if spinner_frame_re.match(frame):
+                        if echo:
+                            sys.stdout.write(frame + "\r")
+                            sys.stdout.flush()
+                    else:
+                        # это одиночная "строка без \n" - покажем как есть (в терминал), в лог не пишем
+                        if echo:
+                            sys.stdout.write(frame + "\r")
+                            sys.stdout.flush()
+                    continue
 
-            # уже отформатированные (с таймстампом и [name]) → только в host.log
-            if ts_log_re.match(line):
-                host_log_file.write(line + "\n")
-                host_log_file.flush()
-                continue
+                if ch == "\n":
+                    # полноценная строка
+                    line = ansi_re.sub("", buf)
+                    buf = ""
+                    if not line.strip():
+                        continue
+                    if ts_log_re.match(line):
+                        host_log_file.write(line + "\n")
+                        host_log_file.flush()
+                        continue
+                    if plain_marker_re.match(line):
+                        continue
+                    if compose_runtime_re.match(line):
+                        continue
+                    if console_marker_re.match(line):
+                        if echo:
+                            print(line)
+                        continue
+                    if spinner_frame_re.match(line):
+                        if echo:
+                            sys.stdout.write(line + "\r")
+                            sys.stdout.flush()
+                        continue
+                    host_log_file.write(line + "\n")
+                    host_log_file.flush()
+                    if echo:
+                        print(line)
+                    continue
 
-            # кадры спиннера вида "[|] msg", "[/] msg", "[-] msg", "[\] msg" — показываем в терминале без \n
-            if spinner_frame_re.match(line):
-                if echo:
-                    sys.stdout.write(line + "\r")
-                    sys.stdout.flush()
-                continue
-
-            # "Start"/"Finish" из ВНУТРЕННЕГО процесса — подавляем целиком (и из echo, и из host.log)
-            if plain_marker_re.match(line):
-                continue
-
-            # служебные сообщения docker compose - игнор
-            if compose_runtime_re.match(line):
-                continue
-
-            # короткие статусы [ok]/[skip]/[add]/[update]/[error] → только терминал (без логгера)
-            if console_marker_re.match(line):
-                if echo:
-                    print(line)
-                continue
-
-            # все остальное → host.log (+ терминал при echo=True)
-            host_log_file.write(line + "\n")
-            host_log_file.flush()
-            if echo:
-                print(line)
-
-    proc.wait()
-    rc = proc.returncode
-    if rc != 0:
-        HOST_LOGGER.error("exit code: %s", rc)
-    return rc
+                # обычный символ - копим
+                buf += ch
+        except KeyboardInterrupt:
+            # аккуратно прервать дочерний процесс, чтобы не висел compose run
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            # дочистим stdout, если что-то осталось
+            try:
+                tail = (proc.stdout.read() or "") if proc.stdout else ""
+                if tail:
+                    for line in tail.replace("\r", "\n").split("\n"):
+                        line = ansi_re.sub("", line).strip()
+                        if not line:
+                            continue
+                        if ts_log_re.match(line):
+                            host_log_file.write(line + "\n")
+                        elif console_marker_re.match(line):
+                            if echo:
+                                print(line)
+                        elif not spinner_frame_re.match(line):
+                            host_log_file.write(line + "\n")
+                            if echo:
+                                print(line)
+                    host_log_file.flush()
+            except Exception:
+                pass
+            raise
 
 
 # Shell: выполнение команды и возврат (rc, stdout_text), лог в setup.log

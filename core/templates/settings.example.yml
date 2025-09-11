@@ -31,7 +31,7 @@ crm:
   linkedin: 1113201, medium: 1113983, phone: null, reddit: 1113195, telegram: 1113197,
   web: 195000, x: 1113199, youtube: 1113193}
     safe_mode:
-      dry_run: false
+      dry_run: true
 ...
       no_overwrite: true
 ...
@@ -46,8 +46,7 @@ modes:
 ...
     tag_process: [new]
 
-link_collections: [linktr.ee, link3.to, bio.link, beacons.ai, carrd.co, withkoji.com, taplink.cc, linkin.bio,
-  t.co]
+link_collections: [linktr.ee, link3.to, bento.me, hub.xyz]
 
 mail:
   smtp_host: "smtp.yourhost.com"

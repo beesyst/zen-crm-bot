@@ -194,11 +194,11 @@ def fetch_url_html(url: str, *, prefer: str = "auto", timeout: int = 30) -> str:
     if (not html) or (not has_social_links(html)) or is_html_suspicious(html):
         # html рендером
         out = fetch_url_html_playwright(
-            url, timeout=max(60, timeout), wait="networkidle", mode="html"
+            url, timeout=max(80, timeout), wait="networkidle", mode="html"
         )
         if (not out) or is_html_suspicious(out):
             out = fetch_url_html_playwright(
-                url, timeout=max(60, timeout), wait="domcontentloaded", mode="html"
+                url, timeout=max(80, timeout), wait="domcontentloaded", mode="html"
             )
 
         # если в dom по-прежнему пусто - просим соц-JSON
@@ -213,7 +213,7 @@ def fetch_url_html(url: str, *, prefer: str = "auto", timeout: int = 30) -> str:
                 need_socials = False
         if need_socials:
             out = fetch_url_html_playwright(
-                url, timeout=max(60, timeout), wait="networkidle", mode="socials"
+                url, timeout=max(80, timeout), wait="networkidle", mode="socials"
             )
 
         _FETCHED_HTML_CACHE[url] = out or html
@@ -382,25 +382,125 @@ def find_best_docs_link(soup: BeautifulSoup, base_url: str) -> str:
 
 # Парс соцсетей и docs из HTML сайта
 def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -> dict:
-    # если прилетел соц-json - вернем его как есть
+    # попытка распарсить как JSON
     try:
         j = json.loads(html or "")
-        if isinstance(j, dict) and j.get("websiteURL"):
-            for k, v in list(j.items()):
-                if isinstance(v, str):
-                    j[k] = force_https(v)
-            return j
-        # если это пакет {ok, html|text, ...} - вытянем html и продолжим
-        if isinstance(j, dict) and ("html" in j or "text" in j):
+        # пакет браузера: {ok, html|text, ...} - достаем  dom и продолжаем обычный парсинг
+        if (
+            isinstance(j, dict)
+            and ("html" in j or "text" in j)
+            and not j.get("websiteURL")
+        ):
             html = j.get("html") or j.get("text") or ""
+
+        # соц-json (websiteURL присутствует) - аккуратно чистим/нормализуем и возвращаем
+        elif isinstance(j, dict) and j.get("websiteURL"):
+            allowed = {
+                "websiteURL",
+                "twitterURL",
+                "discordURL",
+                "telegramURL",
+                "youtubeURL",
+                "linkedinURL",
+                "redditURL",
+                "mediumURL",
+                "githubURL",
+                "documentURL",
+                "twitterAll",
+            }
+            j_clean: dict = {}
+            for k, v in j.items():
+                if k in allowed and isinstance(v, (str, list)):
+                    j_clean[k] = v
+
+            # https + twitter.com → x.com (только для известных ключей)
+            for k, v in list(j_clean.items()):
+                if isinstance(v, str) and v:
+                    vv = force_https(v)
+                    if k == "twitterURL" and "twitter.com" in vv:
+                        vv = vv.replace("twitter.com", "x.com")
+                    j_clean[k] = vv
+
+            # валидация twitterURL: должен указывать на x.com/twitter.com
+            if j_clean.get("twitterURL"):
+                if not re.search(
+                    r"(?:^https?://)?(?:www\.)?(?:x\.com|twitter\.com)/",
+                    j_clean["twitterURL"],
+                    re.I,
+                ):
+                    j_clean["twitterURL"] = ""
+
+            # если нет twitterURL, но есть twitterAll - возьмем первый валидный
+            if (not j_clean.get("twitterURL")) and isinstance(
+                j_clean.get("twitterAll"), list
+            ):
+                for u in j_clean["twitterAll"]:
+                    if isinstance(u, str) and re.search(
+                        r"(?:x\.com|twitter\.com)/", u, re.I
+                    ):
+                        j_clean["twitterURL"] = force_https(
+                            u.replace("twitter.com", "x.com")
+                        )
+                        break
+
+            # собираем финальный словарь links из j_clean (без html/text и прочего мусора)
+            links = {k: "" for k in _SOCIAL_PATTERNS}
+            links["websiteURL"] = force_https(base_url)
+            links["documentURL"] = j_clean.get("documentURL", "") or ""
+            twitter_all: list[str] = []
+
+            for k in list(links.keys()) + ["documentURL"]:
+                if k in j_clean and j_clean[k]:
+                    links[k] = (
+                        force_https(j_clean[k])
+                        if isinstance(j_clean[k], str)
+                        else j_clean[k]
+                    )
+
+            # нормализуем twitterAll
+            if isinstance(j_clean.get("twitterAll"), list):
+                for u in j_clean["twitterAll"]:
+                    if isinstance(u, str) and u:
+                        u2 = force_https(u.replace("twitter.com", "x.com"))
+                        if u2 not in twitter_all:
+                            twitter_all.append(u2)
+
+            # если нет twitterURL - добьем из twitterAll
+            if not links.get("twitterURL") and twitter_all:
+                links["twitterURL"] = twitter_all[0]
+
+            # финальная нормализация
+            if links.get("twitterURL"):
+                links["twitterURL"] = force_https(
+                    links["twitterURL"].replace("twitter.com", "x.com")
+                )
+            if twitter_all:
+                links["twitterAll"] = list(dict.fromkeys(twitter_all))
+
+            return links
     except Exception:
         pass
 
-    # обычный html → парсим зоны
+    # обычный html → dom-парсинг зон
     soup = BeautifulSoup(html or "", "html.parser")
     links = {k: "" for k in _SOCIAL_PATTERNS}
     links["websiteURL"] = base_url
     links["documentURL"] = ""
+    twitter_all: list[str] = []
+
+    def _maybe_add_twitter(href_abs: str):
+        try:
+            u = href_abs.replace("twitter.com", "x.com")
+            p = urlparse(u)
+            norm = f"{p.scheme}://{p.netloc}{p.path}".rstrip("/")
+            if re.match(
+                r"^https?://(?:www\.)?x\.com/([A-Za-z0-9_]{1,15})$", norm, re.I
+            ):
+                norm = force_https(norm)
+                if norm not in twitter_all:
+                    twitter_all.append(norm)
+        except Exception:
+            pass
 
     # основные зоны где чаще всего лежат соцссылки
     zones = []
@@ -431,6 +531,8 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
                     or rx.search(aria)
                 ):
                     links[key] = href
+            if _SOCIAL_PATTERNS["twitterURL"].search(href):
+                _maybe_add_twitter(href)
 
     for z in zones:
         _scan(z)
@@ -442,12 +544,14 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
             for key, rx in _SOCIAL_PATTERNS.items():
                 if not links[key] and rx.search(href):
                     links[key] = href
+            if _SOCIAL_PATTERNS["twitterURL"].search(href):
+                _maybe_add_twitter(href)
 
     # документация (лучшая ссылка)
     doc = find_best_docs_link(soup, base_url)
     links["documentURL"] = doc or ""
 
-    # fallback для главной: если пусто по соцсетям - используем browser_fetch.js и возвращаем его json как есть
+    # fallback для главной: попросим браузерный парсер соцсетей
     if is_main_page and all(
         not links[k] for k in links if k not in ("websiteURL", "documentURL")
     ):
@@ -460,30 +564,86 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
         except Exception:
             j2 = {}
 
+        # если пришел соц-JSON - аккуратно смержим только разрешенные поля
         if isinstance(j2, dict) and j2.get("websiteURL"):
-            for k, v in list(j2.items()):
-                if isinstance(v, str):
-                    j2[k] = force_https(v)
+            allowed = {
+                "websiteURL",
+                "twitterURL",
+                "discordURL",
+                "telegramURL",
+                "youtubeURL",
+                "linkedinURL",
+                "redditURL",
+                "mediumURL",
+                "githubURL",
+                "documentURL",
+                "twitterAll",
+            }
+            for k in list(j2.keys()):
+                if k not in allowed:
+                    j2.pop(k, None)
 
-            # мержим найденные соцсети в текущий словарь links
+            # нормализация значений
+            for k, v in list(j2.items()):
+                if isinstance(v, str) and v:
+                    vv = force_https(v)
+                    if k == "twitterURL" and "twitter.com" in vv:
+                        vv = vv.replace("twitter.com", "x.com")
+                    j2[k] = vv
+
+            # валидация twitterURL
+            if j2.get("twitterURL"):
+                if not re.search(
+                    r"(?:^https?://)?(?:www\.)?(?:x\.com|twitter\.com)/",
+                    j2["twitterURL"],
+                    re.I,
+                ):
+                    j2["twitterURL"] = ""
+
+            # мержим найденные соцсети в текущий словарь links (пустые не перетираем)
             for k in list(links.keys()):
                 if k in j2 and j2[k] and not links.get(k):
                     links[k] = j2[k]
 
-            # пытаемся вычислить документaцию: сперва из html/text, затем - по эвристикам (docs.<host>, /docs)
-            html2 = j2.get("html") or j2.get("text") or ""
-            soup2 = (
-                BeautifulSoup(html2, "html.parser")
-                if html2
-                else BeautifulSoup("", "html.parser")
-            )
-            doc2 = find_best_docs_link(soup2, base_url)
-            if doc2 and not links.get("documentURL"):
-                links["documentURL"] = doc2
+            # домержим twitterAll
+            if isinstance(j2.get("twitterAll"), list):
+                for u in j2["twitterAll"]:
+                    if isinstance(u, str) and u:
+                        u2 = force_https(u.replace("twitter.com", "x.com"))
+                        if u2 not in twitter_all:
+                            twitter_all.append(u2)
 
+            # попробуем вычислить документацию по отрендеренному dom, если он был в payload
+            html2 = ""
+            try:
+                # payload - это json-строка от browser_fetch; достанем html/text при наличии
+                tmp = json.loads(payload or "") if payload else {}
+                if isinstance(tmp, dict):
+                    html2 = tmp.get("html") or tmp.get("text") or ""
+            except Exception:
+                html2 = ""
+
+            if html2:
+                soup2 = BeautifulSoup(html2, "html.parser")
+                doc2 = find_best_docs_link(soup2, base_url)
+                if doc2 and not links.get("documentURL"):
+                    links["documentURL"] = doc2
+
+            # если нет twitterURL - добем из twitterAll
+            if (not links.get("twitterURL")) and twitter_all:
+                links["twitterURL"] = twitter_all[0]
+
+            # финальная нормализация и возврат
+            for k, v in list(links.items()):
+                if isinstance(v, str) and v:
+                    if k == "twitterURL":
+                        v = v.replace("twitter.com", "x.com")
+                    links[k] = force_https(v)
+            if twitter_all:
+                links["twitterAll"] = list(dict.fromkeys(twitter_all))
             return links
 
-        # если соц-json не пришел - второй круг по dom из браузера
+        # если прилетел не соц-json, но есть html/text — второй круг по DOM из браузера
         if isinstance(j2, dict) and ("html" in j2 or "text" in j2):
             html2 = j2.get("html") or j2.get("text") or ""
             if html2:
@@ -517,6 +677,8 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
                                 or rx.search(aria)
                             ):
                                 links[key] = href
+                        if _SOCIAL_PATTERNS["twitterURL"].search(href):
+                            _maybe_add_twitter(href)
 
                 for z in zones2:
                     _scan2(z)
@@ -531,16 +693,28 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
                         for key, rx in _SOCIAL_PATTERNS.items():
                             if not links[key] and rx.search(href):
                                 links[key] = href
+                        if _SOCIAL_PATTERNS["twitterURL"].search(href):
+                            _maybe_add_twitter(href)
 
-                # повторно docs по рендеренному DOM
+                # повторно docs по рендеренному dom
                 doc2 = find_best_docs_link(soup2, base_url)
                 if doc2 and not links.get("documentURL"):
                     links["documentURL"] = doc2
 
-    # финальная нормализация - все в https
+    # финальная нормализация - все в https, twitter → x.com
     for k, v in list(links.items()):
         if isinstance(v, str) and v:
+            if k == "twitterURL":
+                v = v.replace("twitter.com", "x.com")
             links[k] = force_https(v)
+
+    # если нет twitterURL, но собран twitterAll - используем первый
+    if not links.get("twitterURL") and twitter_all:
+        links["twitterURL"] = twitter_all[0]
+
+    # добавим twitterAll, если собрали несколько профилей на сайте
+    if twitter_all:
+        links["twitterAll"] = list(dict.fromkeys(twitter_all))
 
     return links
 

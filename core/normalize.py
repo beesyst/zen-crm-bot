@@ -22,15 +22,103 @@ def force_https(url: str | None) -> str:
 def _strip_tracking_params(u: str) -> str:
     try:
         p = urlparse(u)
-        qs = [
-            (k, v)
-            for k, v in parse_qsl(p.query, keep_blank_values=True)
-            if not re.match(r"^(utm_|fbclid|gclid|yclid|mc_)", k, re.I)
-        ]
+        qs = []
+        for k, v in parse_qsl(p.query, keep_blank_values=True):
+            if re.match(r"^(utm_|mc_)", k, re.I):
+                continue
+            if k.lower() in {
+                "fbclid",
+                "gclid",
+                "yclid",
+                "twclid",
+                "dclid",
+                "ref",
+                "ref_",
+                "refsrc",
+                "ref_src",
+                "source",
+                "src",
+                "aff",
+                "affiliate",
+                "campaign",
+                "utm",
+                "igshid",
+            }:
+                continue
+            qs.append((k, v))
         clean = p._replace(query=urlencode(qs))
         return urlunparse(clean)
     except Exception:
         return u
+
+
+# Нормализация единого URL (https + без трекинга + без завершающего слеша)
+def normalize_url(u: str | None) -> str:
+    if not isinstance(u, str) or not u.strip():
+        return ""
+    s = force_https(u.strip())
+    if not s:
+        return ""
+    s = _strip_tracking_params(s)
+    s = twitter_to_x(s)
+    return s.rstrip("/")
+
+
+# Нормализация списка URL (с сохранением порядка и дедупликацией)
+def normalize_urls_list(lst: list[str] | None) -> list[str]:
+    out: list[str] = []
+    seen = set()
+    for x in lst or []:
+        u = normalize_url(x)
+        if u and u not in seen:
+            out.append(u)
+            seen.add(u)
+    return out
+
+
+# Нормализация хоста/домена (lower, без www., без порта/пути)
+def normalize_host(h: str | None) -> str:
+    s = (h or "").strip().lower()
+    if not s:
+        return ""
+    if s.startswith("//"):
+        s = "https:" + s
+    if s.startswith("http://") or s.startswith("https://"):
+        try:
+            s = urlparse(s).netloc
+        except Exception:
+            s = s.split("://", 1)[-1]
+    s = s.split("/", 1)[0]
+    s = s.split(":", 1)[0]
+    if s.startswith("www."):
+        s = s[4:]
+    return s
+
+
+# Нормализация списка доменов/хостов (с сохранением порядка и дедупликацией)
+def normalize_host_list(lst: list[str] | None) -> list[str]:
+    out: list[str] = []
+    seen = set()
+    for x in lst or []:
+        h = normalize_host(x)
+        if h and h not in seen:
+            out.append(h)
+            seen.add(h)
+    return out
+
+
+# Приведение twitter.com → x.com
+def twitter_to_x(u: str | None) -> str:
+    if not isinstance(u, str) or not u.strip():
+        return ""
+    s = force_https(u.strip())
+    if not s:
+        return ""
+    # twitter.com → x.com
+    s = re.sub(r"^https://twitter\.com", "https://x.com", s, flags=re.I)
+    # уберем query/fragment
+    s = re.sub(r"[?#].*$", "", s)
+    return s.rstrip("/")
 
 
 # Нормализация словаря соц-ссылок: https + уборка трекинга + трим/слэш
@@ -39,12 +127,7 @@ def normalize_socials(socials: dict | None) -> dict:
         return {}
     out: dict[str, str] = {}
     for k, v in socials.items():
-        if isinstance(v, str) and v.strip():
-            u = force_https(v.strip())
-            u = _strip_tracking_params(u)
-            out[k] = u.rstrip("/")
-        else:
-            out[k] = ""
+        out[k] = normalize_url(v) if isinstance(v, str) and v.strip() else ""
     return out
 
 

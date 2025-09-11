@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any, Dict
+from urllib.parse import urlparse
 
 from app.adapters.crm.kommo import KommoAdapter
 from core.collector import collect_main_data
 from core.log_setup import get_logger
+from core.normalize import force_https, normalize_socials
 from core.paths import MAIN_TEMPLATE, STORAGE_PROJECTS
 
 _log = get_logger("orchestrator")
@@ -28,10 +30,13 @@ def _write_json(p: Path, data: Dict[str, Any]) -> None:
 
 # Превращение URL в "слаг" (корневой хост без www и порта)
 def _slug(url: str) -> str:
-    host = url.split("//")[-1].split("/")[0].lower()
-    if host.startswith("www."):
-        host = host[4:]
-    return host.split(":")[0]
+    try:
+        netloc = urlparse(url).netloc.lower()
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+        return netloc.split(":")[0]
+    except Exception:
+        return (url or "").strip().lower()
 
 
 # Загрузка JSON-шаблона main_template.json (если нет - минимальный каркас)
@@ -81,10 +86,14 @@ def _plan_updates(
         .get("no_overwrite", True)
     )
 
+    tw = socials.get("twitterURL") or ""
+    if tw:
+        tw = force_https(tw.replace("twitter.com", "x.com"))
+
     want = {
         "web": socials.get("websiteURL") or "",
         "docs": socials.get("documentURL") or "",
-        "x": socials.get("twitterURL") or "",
+        "x": tw,
         "discord": socials.get("discordURL") or "",
         "github": socials.get("githubURL") or "",
         "linkedin": socials.get("linkedinURL") or "",
@@ -136,7 +145,14 @@ def enrich_company_by_url(
         _write_json(main_path, data)
         _log.info("main.json сохранен: %s", str(main_path))
 
-    socials = (data or {}).get("socialLinks") or {}
+    socials_raw = (data or {}).get("socialLinks") or {}
+    socials = normalize_socials(socials_raw)
+
+    # приводим twitter → x
+    tw = socials.get("twitterURL") or ""
+    if tw:
+        socials["twitterURL"] = force_https(tw.replace("twitter.com", "x.com"))
+
     updates = _plan_updates(socials, settings, company)
 
     kommo_changed = False
