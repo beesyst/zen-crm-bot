@@ -100,9 +100,6 @@ def run_research_pipeline(options: OrchestratorOptions | None = None) -> None:
 
     for url in sites:
         app = brand_from_url(url) or "project"
-        # технические шаги только в host.log
-        _log.info("Создание main.json - %s - %s", app, url)
-        _log.info("Сбор соц линков - %s - %s", app, url)
 
         t0 = time.time()
         try:
@@ -212,8 +209,7 @@ def run_enrich_pipeline(options: OrchestratorOptions | None = None) -> None:
         app = (c.get("name") or "").strip() or brand_from_url(url) or "project"
 
         # технические шаги в host.log
-        _log.info("Создание main.json - %s - %s", app, url)
-        _log.info("Сбор соц линков - %s - %s", app, url)
+        _log.info("Старт %s - %s", app, url)
 
         t0 = time.time()
         try:

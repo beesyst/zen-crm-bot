@@ -94,6 +94,13 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
                     main_data["socialLinks"][k] = ""
                 main_data["socialLinks"][k] = v.strip()
 
+        # начальное обогащение по сайту (до проверки X/агрегаторов)
+        logger.info(
+            "Начальное обогащение %s: %s",
+            website_url,
+            {k: v for k, v in main_data["socialLinks"].items() if v},
+        )
+
         # разбор X/Twitter: выбор верифицированного, домерж из агрегатора, аватар
         site_domain = get_domain_name(website_url)
         brand_token = site_domain.split(".")[0] if site_domain else ""
@@ -219,6 +226,18 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
                     socials_from_agg = (
                         extract_socials_from_aggregator(aggregator_from_bio) or {}
                     )
+                    # единообразный лог в стиле twitter.py
+                    try:
+                        from core.log_setup import get_logger as _get_logger
+
+                        _twlog = _get_logger("twitter")
+                        _twlog.info(
+                            "Агрегатор обогащение %s: %s",
+                            aggregator_from_bio,
+                            {k: v for k, v in socials_from_agg.items() if v},
+                        )
+                    except Exception:
+                        pass
                     for k, v in socials_from_agg.items():
                         if k == "websiteURL" or not v:
                             continue
@@ -290,8 +309,14 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
         if isinstance(v, str) and v:
             main_data["socialLinks"][k] = force_https(v)
 
+    # Хард-чек: twitterURL строго https://x.com/<handle>
+    tw = main_data["socialLinks"].get("twitterURL", "")
+    if isinstance(tw, str) and tw:
+        if not re.match(r"^https?://(?:www\.)?x\.com/[A-Za-z0-9_]{1,15}$", tw, re.I):
+            main_data["socialLinks"]["twitterURL"] = ""
+
     logger.info(
-        "Result socials %s: %s",
+        "Конечный результат %s: %s",
         website_url,
         {k: v for k, v in main_data["socialLinks"].items() if v},
     )

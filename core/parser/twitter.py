@@ -375,40 +375,26 @@ def _parse_nitter_profile(twitter_url: str) -> Dict[str, object]:
     links = set()
     seen = set()
     areas = [
+        ".profile-card .profile-website a",
+        ".profile-card .profile-bio a",
         ".profile-website a",
         ".profile-bio a",
-        ".profile-card-bio a",
-        ".user-profile .bio a",
-        ".profile-card-description a",
-        "a[rel='me']",
-        "a[href*='://']",
     ]
     for sel in areas:
         for a in soup.select(sel):
             href = (a.get("href") or "").strip()
             if not href:
                 continue
-            if href.startswith("/url/"):
-                href = href[len("/url/") :]
-            if href.startswith(("/out?", "/redirect?", "/external?")):
-                try:
-                    qs = href.split("?", 1)[1]
-                    parts = [kv.split("=", 1) for kv in qs.split("&") if "=" in kv]
-                    mp = {k: v for (k, v) in parts}
-                    cand = mp.get("url") or mp.get("u") or ""
-                    if cand:
-                        href = unquote(cand)
-                except Exception:
-                    pass
             try:
                 abs_u = urljoin(base, href)
             except Exception:
                 abs_u = href
-            if abs_u.startswith("http"):
-                u = force_https(abs_u)
-                if u not in seen:
-                    links.add(u)
-                    seen.add(u)
+            if not abs_u.startswith("http"):
+                continue
+            u = force_https(abs_u)
+            if u not in seen:
+                links.add(u)
+                seen.add(u)
 
     # аватар: raw для лога (инстанс/pic/...), normalized для использования
     avatar_raw, avatar_norm = _pick_avatar_from_soup(soup, inst)
@@ -571,25 +557,38 @@ def _html_matches_handle(html: str, handle: str) -> bool:
 # Вытаскивание всех кандидатов-профилей X из HTML (ссылки + голый текст)
 def extract_twitter_profiles(html: str, base_url: str) -> List[str]:
     soup = BeautifulSoup(html or "", "html.parser")
-    profiles = set()
+    profiles: set[str] = set()
 
+    # из ссылок <a>
     for a in soup.find_all("a", href=True):
         raw = urljoin(base_url, a["href"])
-        if not re.search(r"(twitter\.com|x\.com)", raw, re.I):
+        if not re.search(r"(?:^|//)(?:[^/]*\.)?(?:twitter\.com|x\.com)/", raw, re.I):
             continue
-        if re.search(r"/status/|/share|/intent|/search|/hashtag/", raw, re.I):
-            continue
+
         try:
             p = urlparse(raw)
-            clean = f"{p.scheme}://{p.netloc}{p.path}"
-            clean = clean.replace("twitter.com", "x.com")
-            clean = force_https(clean.rstrip("/"))
+            path = p.path or "/"
+            # отбрасываем служебные/непрофильные пути
+            if re.search(
+                r"/(?:status/|share|intent|search|hashtag|i/|home|messages|explore|notifications)(?:/|$)",
+                path,
+                re.I,
+            ):
+                continue
+
+            # матчим /<handle>(/?) без хвостов
+            m = re.match(r"^/([A-Za-z0-9_]{1,15})/?$", path)
+            if not m:
+                continue
+            handle = m.group(1)
+
+            # канонизируем к https://x.com/<handle>
+            clean = f"https://x.com/{handle}"
+            profiles.add(force_https(clean))
         except Exception:
             continue
-        m = re.match(r"^https?://(?:www\.)?x\.com/([A-Za-z0-9_]{1,15})$", clean, re.I)
-        if m:
-            profiles.add(clean)
 
+    # из голого текста (полные url) - тоже строгая валидация
     text = html or ""
     for m in re.finditer(
         r"https?://(?:www\.)?(?:x\.com|twitter\.com)/([A-Za-z0-9_]{1,15})(?![A-Za-z0-9_/])",
@@ -597,11 +596,9 @@ def extract_twitter_profiles(html: str, base_url: str) -> List[str]:
         re.I,
     ):
         try:
-            u = m.group(0)
-            u = u.replace("twitter.com", "x.com")
-            u = force_https(u.rstrip("/"))
-            if re.match(r"^https?://(?:www\.)?x\.com/([A-Za-z0-9_]{1,15})$", u, re.I):
-                profiles.add(u)
+            handle = m.group(1)
+            clean = f"https://x.com/{handle}"
+            profiles.add(force_https(clean))
         except Exception:
             pass
 
@@ -627,14 +624,13 @@ def verify_twitter_and_enrich(
     if not _is_valid_profile(data):
         return False, {}, ""
 
-    # прямой офсайт в BIO → подтверждаем X
+    # прямой офсайт в bio → подтверждаем X
     site_domain_norm = (site_domain or "").lower().lstrip(".")
     bio_links = [force_https(b).rstrip("/") for b in (data.get("links") or [])]
-    logger.info("BIO links parsed from Nitter: %s", bio_links)
+    logger.info("BIO из Nitter: %s", bio_links)
     for b in bio_links:
         try:
             if site_domain_norm and _host(b).endswith(site_domain_norm):
-                logger.info("BIO: найден официальный сайт %s — X подтверждён", b)
                 return True, {"websiteURL": f"https://www.{site_domain_norm}/"}, ""
         except Exception:
             pass
@@ -654,7 +650,11 @@ def verify_twitter_and_enrich(
     handle = m.group(1) if m else ""
 
     aggs = find_aggregators_in_links(bio_links)
-    logger.info("Aggregators detected in BIO (with path): %s", aggs)
+
+    for agg in aggs:
+        agg_norm = force_https(agg)
+        logger.info("BIO агрегатор: %s", agg_norm)
+        ok, bits = verify_aggregator_belongs(agg_norm, site_domain_norm, handle)
 
     def _normalize_socials(d: dict) -> dict:
         out = {}
@@ -738,10 +738,11 @@ def verify_twitter_and_enrich(
                 bits["websiteURL"] = f"https://www.{site_domain_norm}/"
 
             logger.info(
-                "Агрегатор подтверждён (%s) и дал соц-ссылки: %s",
+                "Агрегатор обогащение %s: %s",
                 agg_norm,
                 {k: v for k, v in (bits or {}).items() if v},
             )
+
             return True, bits, agg_norm
 
     if aggs:
@@ -837,36 +838,45 @@ def select_verified_twitter(
             deduped.append(nu)
             seen.add(nu)
 
-    # строгая проверка каждого кандидата
-    for u in deduped:
-        ok, extra, agg = verify_twitter_and_enrich(u, site_domain)
-        if not ok:
-            continue
+    # параллельная строгая проверка (если кандидатов несколько)
+    if len(deduped) > 1:
+        import concurrent.futures as _f
 
-        twitter_final = u
-        enriched_from_agg = extra or {}
-        aggregator_url = agg or ""
-
-        if aggregator_url:
-            logger.info(
-                "X подтвержден через агрегатор: %s → %s", twitter_final, aggregator_url
-            )
-        else:
-            logger.info("X подтвержден напрямую: %s", twitter_final)
-
-        _VERIFIED_TW_URL = twitter_final
-        _VERIFIED_ENRICHED = dict(enriched_from_agg)
-        _VERIFIED_AGG_URL = aggregator_url
-        _VERIFIED_DOMAIN = (site_domain or "").lower()
-
-        try:
-            prof = get_links_from_x_profile(twitter_final, need_avatar=True)
-            avatar_verified = (prof or {}).get("avatar", "") or ""
-        except Exception:
-            avatar_verified = ""
-
-        logger.info("X подтвержден: %s", twitter_final)
-        return twitter_final, enriched_from_agg, aggregator_url, avatar_verified
+        with _f.ThreadPoolExecutor(max_workers=min(4, len(deduped))) as ex:
+            futures = {
+                ex.submit(verify_twitter_and_enrich, u, site_domain): u for u in deduped
+            }
+            for fut in _f.as_completed(futures):
+                try:
+                    ok, extra, agg = fut.result()
+                except Exception:
+                    continue
+                if ok:
+                    u = normalize_twitter_url(futures[fut])
+                    twitter_final = u
+                    enriched_from_agg = extra or {}
+                    aggregator_url = agg or ""
+                    _VERIFIED_TW_URL = twitter_final
+                    _VERIFIED_ENRICHED = dict(enriched_from_agg)
+                    _VERIFIED_AGG_URL = aggregator_url
+                    _VERIFIED_DOMAIN = (site_domain or "").lower()
+                    try:
+                        prof = get_links_from_x_profile(twitter_final, need_avatar=True)
+                        avatar_verified = (prof or {}).get("avatar", "") or ""
+                    except Exception:
+                        avatar_verified = ""
+                    logger.info("X подтвержден: %s", twitter_final)
+                    return (
+                        twitter_final,
+                        enriched_from_agg,
+                        aggregator_url,
+                        avatar_verified,
+                    )
+    else:
+        for u in deduped:
+            ok, extra, agg = verify_twitter_and_enrich(u, site_domain)
+            if not ok:
+                continue
 
     logger.info(
         "X: кандидаты с сайта=%d, ни один не подтвержден - twitterURL пуст",

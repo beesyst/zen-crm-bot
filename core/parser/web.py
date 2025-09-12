@@ -76,23 +76,45 @@ def is_html_suspicious(html: str) -> bool:
 
 # Быстрая проверка: есть ли ссылки на основные соцсети
 def has_social_links(html: str) -> bool:
-    low = html.lower()
-    for dom in (
-        "twitter.com",
-        "x.com",
-        "discord.gg",
-        "discord.com",
-        "t.me",
-        "telegram.me",
-        "github.com",
-        "medium.com",
-        "youtube.com",
-        "youtu.be",
-        "linkedin.com",
-        "lnkd.in",
-        "reddit.com",
+    soup = BeautifulSoup(html or "", "html.parser")
+
+    # быстро проверяем все <a href>
+    for a in soup.find_all("a", href=True):
+        h = _host(urljoin("https://example.org/", a["href"]))
+        if h in (
+            "x.com",
+            "twitter.com",
+            "discord.gg",
+            "discord.com",
+            "t.me",
+            "telegram.me",
+            "github.com",
+            "medium.com",
+            "youtube.com",
+            "youtu.be",
+            "linkedin.com",
+            "lnkd.in",
+            "reddit.com",
+        ):
+            return True
+
+    # фолбэк: по сырому тексту
+    low = (html or "").lower()
+    for rx in (
+        r"(?:^|[^a-z0-9])x\.com(?:/|[^a-z0-9]|$)",
+        r"(?:^|[^a-z0-9])twitter\.com(?:/|[^a-z0-9]|$)",
+        r"(?:^|[^a-z0-9])discord\.(?:gg|com)(?:/|[^a-z0-9]|$)",
+        r"(?:^|[^a-z0-9])t\.me(?:/|[^a-z0-9]|$)",
+        r"(?:^|[^a-z0-9])telegram\.me(?:/|[^a-z0-9]|$)",
+        r"(?:^|[^a-z0-9])github\.com(?:/|[^a-z0-9]|$)",
+        r"(?:^|[^a-z0-9])medium\.com(?:/|[^a-z0-9]|$)",
+        r"(?:^|[^a-z0-9])youtube\.com(?:/|[^a-z0-9]|$)",
+        r"(?:^|[^a-z0-9])youtu\.be(?:/|[^a-z0-9]|$)",
+        r"(?:^|[^a-z0-9])linkedin\.com(?:/|[^a-z0-9]|$)",
+        r"(?:^|[^a-z0-9])lnkd\.in(?:/|[^a-z0-9]|$)",
+        r"(?:^|[^a-z0-9])reddit\.com(?:/|[^a-z0-9]|$)",
     ):
-        if dom in low:
+        if re.search(rx, low):
             return True
     return False
 
@@ -225,7 +247,9 @@ def fetch_url_html(url: str, *, prefer: str = "auto", timeout: int = 30) -> str:
 
 # Регулярки для распознавания соцсетей
 _SOCIAL_PATTERNS = {
-    "twitterURL": re.compile(r"(?:twitter\.com|x\.com)", re.I),
+    "twitterURL": re.compile(
+        r"(?:^|://)(?:www\.)?(?:x\.com|twitter\.com)(?:/|$)", re.I
+    ),
     "discordURL": re.compile(r"(?:discord\.gg|discord\.com)", re.I),
     "telegramURL": re.compile(r"(?:t\.me|telegram\.me)", re.I),
     "youtubeURL": re.compile(r"(?:youtube\.com|youtu\.be)", re.I),
@@ -335,7 +359,7 @@ def find_best_docs_link(soup: BeautifulSoup, base_url: str) -> str:
         for cand in explicit_candidates:
             if _verify_docs(cand):
                 if cand not in _DOCS_LOGGED:
-                    logger.info("docs link found: %s", cand)
+                    logger.debug("docs link found: %s", cand)
                     _DOCS_LOGGED.add(cand)
                 return cand
 
@@ -523,14 +547,25 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
             text = (a.get_text(" ", strip=True) or "").lower()
             rel = " ".join(a.get("rel") or []).lower()
             aria = (a.get("aria-label") or "").lower()
+
             for key, rx in _SOCIAL_PATTERNS.items():
-                if not links[key] and (
-                    rx.search(href)
-                    or rx.search(text)
-                    or rx.search(rel)
-                    or rx.search(aria)
-                ):
-                    links[key] = href
+                if links.get(key):
+                    continue
+
+                if key == "twitterURL":
+                    # строго проверяем хост
+                    host = _host(href)
+                    if host in ("x.com", "twitter.com"):
+                        links[key] = href
+                else:
+                    if (
+                        rx.search(href)
+                        or rx.search(text)
+                        or rx.search(rel)
+                        or rx.search(aria)
+                    ):
+                        links[key] = href
+
             if _SOCIAL_PATTERNS["twitterURL"].search(href):
                 _maybe_add_twitter(href)
 
@@ -541,9 +576,19 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
     if all(not links[k] for k in links if k != "websiteURL"):
         for a in soup.find_all("a", href=True):
             href = urljoin(base_url, a["href"])
+
+            # доменная проверка для твиттера
+            if not links["twitterURL"]:
+                host = _host(href)
+                if host in ("x.com", "twitter.com"):
+                    links["twitterURL"] = href
+
             for key, rx in _SOCIAL_PATTERNS.items():
+                if key == "twitterURL":
+                    continue
                 if not links[key] and rx.search(href):
                     links[key] = href
+
             if _SOCIAL_PATTERNS["twitterURL"].search(href):
                 _maybe_add_twitter(href)
 
@@ -711,6 +756,14 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
     # если нет twitterURL, но собран twitterAll - используем первый
     if not links.get("twitterURL") and twitter_all:
         links["twitterURL"] = twitter_all[0]
+
+    # хард проверка: twitterURL только вида https://x.com/<handle>
+    if links.get("twitterURL"):
+        if not re.match(
+            r"^https?://(?:www\.)?x\.com/[A-Za-z0-9_]{1,15}$", links["twitterURL"], re.I
+        ):
+            logger.warning("web: drop invalid twitterURL: %s", links["twitterURL"])
+            links["twitterURL"] = ""
 
     # добавим twitterAll, если собрали несколько профилей на сайте
     if twitter_all:
