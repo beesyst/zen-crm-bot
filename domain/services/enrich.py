@@ -133,9 +133,6 @@ def enrich_company_by_url(
     project_dir = STORAGE_PROJECTS / slug
     main_path = project_dir / "main.json"
 
-    _log.info("Создание main.json - %s - %s", slug, url)
-    _log.info("Сбор соц линков - %s - %s", slug, url)
-
     template = _load_template()
     data = collect_main_data(url, template, str(project_dir))
 

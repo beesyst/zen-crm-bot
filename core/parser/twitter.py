@@ -14,6 +14,12 @@ from core.log_setup import get_logger
 from core.normalize import force_https
 from core.settings import get_nitter_cfg
 
+from .link_aggregator import (
+    extract_socials_from_aggregator,
+    find_aggregators_in_links,
+    verify_aggregator_belongs,
+)
+
 logger = get_logger("twitter")
 
 
@@ -628,19 +634,16 @@ def verify_twitter_and_enrich(
     site_domain_norm = (site_domain or "").lower().lstrip(".")
     bio_links = [force_https(b).rstrip("/") for b in (data.get("links") or [])]
     logger.info("BIO из Nitter: %s", bio_links)
+
+    # отмечаем, что X подтвержден по офсайту
+    confirmed_by_site = False
     for b in bio_links:
         try:
             if site_domain_norm and _host(b).endswith(site_domain_norm):
-                return True, {"websiteURL": f"https://www.{site_domain_norm}/"}, ""
+                confirmed_by_site = True
+                break
         except Exception:
             pass
-
-    # подготовка к проверке агрегаторов
-    from .link_aggregator import (
-        extract_socials_from_aggregator,
-        find_aggregators_in_links,
-        verify_aggregator_belongs,
-    )
 
     m = re.match(
         r"^https?://(?:www\.)?x\.com/([A-Za-z0-9_]{1,15})/?$",
@@ -648,13 +651,30 @@ def verify_twitter_and_enrich(
         re.I,
     )
     handle = m.group(1) if m else ""
-
     aggs = find_aggregators_in_links(bio_links)
+
+    enriched_bits: dict = {}
+    agg_used = ""
 
     for agg in aggs:
         agg_norm = force_https(agg)
-        logger.info("BIO агрегатор: %s", agg_norm)
         ok, bits = verify_aggregator_belongs(agg_norm, site_domain_norm, handle)
+        if ok:
+            enriched_bits = bits or {}
+            agg_used = agg_norm
+            break
+
+    # если X подтверждён по сайту или по агрегатору - лог один раз и возвращаем
+    if confirmed_by_site or enriched_bits:
+        # если офсайт подтвержден, но websiteURL в обогащении пуст - допишем
+        if (
+            confirmed_by_site
+            and site_domain_norm
+            and not enriched_bits.get("websiteURL")
+        ):
+            enriched_bits["websiteURL"] = f"https://www.{site_domain_norm}/"
+        logger.info("X подтвержден: %s", twitter_url)
+        return True, enriched_bits, agg_used
 
     def _normalize_socials(d: dict) -> dict:
         out = {}
@@ -736,12 +756,6 @@ def verify_twitter_and_enrich(
 
             if has_official_site and not bits.get("websiteURL") and site_domain_norm:
                 bits["websiteURL"] = f"https://www.{site_domain_norm}/"
-
-            logger.info(
-                "Агрегатор обогащение %s: %s",
-                agg_norm,
-                {k: v for k, v in (bits or {}).items() if v},
-            )
 
             return True, bits, agg_norm
 
@@ -865,7 +879,6 @@ def select_verified_twitter(
                         avatar_verified = (prof or {}).get("avatar", "") or ""
                     except Exception:
                         avatar_verified = ""
-                    logger.info("X подтвержден: %s", twitter_final)
                     return (
                         twitter_final,
                         enriched_from_agg,
@@ -875,8 +888,20 @@ def select_verified_twitter(
     else:
         for u in deduped:
             ok, extra, agg = verify_twitter_and_enrich(u, site_domain)
-            if not ok:
-                continue
+            if ok:
+                twitter_final = normalize_twitter_url(u)
+                enriched_from_agg = extra or {}
+                aggregator_url = agg or ""
+                _VERIFIED_TW_URL = twitter_final
+                _VERIFIED_ENRICHED = dict(enriched_from_agg)
+                _VERIFIED_AGG_URL = aggregator_url
+                _VERIFIED_DOMAIN = (site_domain or "").lower()
+                try:
+                    prof = get_links_from_x_profile(twitter_final, need_avatar=True)
+                    avatar_verified = (prof or {}).get("avatar", "") or ""
+                except Exception:
+                    avatar_verified = ""
+                return twitter_final, enriched_from_agg, aggregator_url, avatar_verified
 
     logger.info(
         "X: кандидаты с сайта=%d, ни один не подтвержден - twitterURL пуст",

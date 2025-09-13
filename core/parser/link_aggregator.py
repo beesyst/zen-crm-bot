@@ -9,7 +9,7 @@ from core.log_setup import get_logger
 from core.normalize import force_https, normalize_url, twitter_to_x
 from core.settings import get_link_collections, get_social_hosts, get_social_keys
 
-logger = get_logger("parser.link_aggregator")
+logger = get_logger("link_aggregator")
 
 
 # Хелперы
@@ -148,10 +148,10 @@ def extract_socials_from_aggregator(agg_url: str) -> dict:
             candidate_sites.append(u)
 
     # ссылки из <a>
-    logger.info("Aggregator parse start: %s", agg_url)
+    logger.debug("Aggregator parse start: %s", agg_url)
     for a in soup.find_all("a", href=True):
         _emit(urljoin(agg_url, a["href"]))
-    logger.info("Aggregator parsed: %s", {k: v for k, v in out.items() if v})
+    logger.debug("Aggregator parsed: %s", {k: v for k, v in out.items() if v})
 
     # если явных кандидатов нет - попробуем canonical/og:url
     if not candidate_sites:
@@ -234,7 +234,7 @@ def verify_aggregator_belongs(
     if ok:
         bits = extract_socials_from_aggregator(agg_url)
         logger.info(
-            "Агрегатор подтвержден %s → %s",
+            "Агрегатор %s подтвержден и спарсен: %s",
             agg_url,
             {k: v for k, v in bits.items() if v},
         )
