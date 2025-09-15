@@ -233,12 +233,12 @@ async function browserFetch(opts) {
           try {
             const u = new URL(href, base);
             const p = u.pathname || '';
-            if (/^\/(out|redirect|external|go|away|r)($|[\/?])/i.test(p)) {
-              const urlParam = u.searchParams.get('url') ||
-                              u.searchParams.get('u') ||
-                              u.searchParams.get('target') ||
-                              u.searchParams.get('to');
-              if (urlParam) return urlParam;
+            if (/^\/(out|redirect|external|go|away|r|link|jump)($|[\/?])/i.test(p)) {
+              const keys = ['url','u','to','target','redirect','redirect_uri','dest','destination','link'];
+              for (const k of keys) {
+                const v = u.searchParams.get(k);
+                if (v) return v;
+              }
             }
             return href;
           } catch { return href; }
@@ -255,15 +255,56 @@ async function browserFetch(opts) {
 
           const rel = (a.getAttribute('rel') || '').toLowerCase();
           const aria = (a.getAttribute('aria-label') || '').toLowerCase();
+          const title = (a.getAttribute('title') || '').toLowerCase();
+          const text  = (a.textContent || '').toLowerCase();
 
-          const href = toAbs(unwrapRedirect(raw));
+          let href = toAbs(unwrapRedirect(raw));
+
+          // доп. извлечение из data-атрибутов и onclick
+          const candAttrs = [
+            a.getAttribute('data-href'),
+            a.getAttribute('data-url'),
+            a.getAttribute('data-target'),
+            a.getAttribute('data-link'),
+          ].filter(Boolean);
+
+          let onclick = a.getAttribute('onclick') || '';
+          if (onclick && /https?:\/\//i.test(onclick)) {
+            try {
+              const m = onclick.match(/https?:\/\/[^\s"'()]+/ig);
+              if (m && m.length) candAttrs.push(...m);
+            } catch {}
+          }
+
+          for (let c of candAttrs) {
+            try {
+              c = toAbs(unwrapRedirect(String(c)));
+              // если это discord/x - берем его вместо внутреннего /discord
+              if (!patterns.discordURL.test(href) && patterns.discordURL.test(c)) href = c;
+              if (!rxTwitter.test(href) && rxTwitter.test(c)) href = c;
+            } catch {}
+          }
+
+          // внутренняя «заглушка» /discord → отдаем как есть (дальше python разрулит редирект)
+          if (!patterns.discordURL.test(href) && /(^|\b)discord\b/i.test(raw)) {
+            href = toAbs(raw);
+          }
+
+          // если по домену Discord не распознан, но текст/aria/title содержат "discord" - считаем это discord-кнопкой
+          if (!acc.discordURL && !patterns.discordURL.test(href) &&
+              (text.includes('discord') || aria.includes('discord') || title.includes('discord'))) {
+            acc.discordURL = href; // пусть Python потом развернёт до discord.com/invite/...
+          }
+
+          // обычная доменная проверка
           for (const [key, rx] of Object.entries(patterns)) {
-            if (!acc[key] && (rx.test(href) || rx.test(rel) || rx.test(aria))) {
+            if (!acc[key] && (rx.test(href) || rx.test(rel) || rx.test(aria) || rx.test(title))) {
               acc[key] = href;
             }
           }
           if (rxTwitter.test(href)) twitterAll.add(href);
         });
+
 
         // JSON-LD sameAs
         try {

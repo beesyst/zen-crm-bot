@@ -39,44 +39,68 @@ def _host(u: str) -> str:
 
 # Если ссылка короткая (bit.ly/lnkd.in/…): редирект и возврат каноническего https://x.com/<handle>
 def _resolve_x_profile_via_redirect(u: str, timeout: int = 8) -> str:
+    uu = force_https(u or "")
+    if not uu:
+        return ""
+    # быстрый кейс
+    prof = _extract_x_profile(uu)
+    if prof:
+        return prof
+
+    from urllib.parse import parse_qs, unquote, urlparse
+
     try:
-        uu = force_https(u or "")
-        if not uu:
-            return ""
-        # быстрый кейс: вдруг уже профиль
-        prof = _extract_x_profile(uu)
-        if prof:
-            return prof
+        p = urlparse(uu)
+        q = parse_qs(p.query or "")
 
-        # попытка вытащить вшитые ссылки из query (?url=..., &to=..., &u=...)
-        from urllib.parse import parse_qs, unquote, urlparse
+        # intent & login кейсы
+        screen = (q.get("screen_name") or [""])[0].strip()
+        if screen and re.match(r"^[A-Za-z0-9_]{1,15}$", screen):
+            return f"https://x.com/{screen}"
 
+        redir = (q.get("redirect_after_login") or [""])[0]
+        if redir:
+            redir = force_https(unquote(redir))
+            prof2 = _extract_x_profile(redir)
+            if prof2:
+                return prof2
+
+        # generic ?url/u/to/target=
+        for key in ("url", "u", "to", "target", "redirect", "redirect_uri"):
+            for cand in q.get(key, []):
+                cand = force_https(unquote(cand or ""))
+                prof2 = _extract_x_profile(cand)
+                if prof2:
+                    return prof2
+    except Exception:
+        pass
+
+    # сеть
+    try:
+        r = requests.head(
+            uu, allow_redirects=True, timeout=timeout, headers={"User-Agent": UA}
+        )
+        final = r.url or uu
+    except Exception:
         try:
-            p = urlparse(uu)
-            qs = parse_qs(p.query or "")
-            for key in ("url", "u", "to", "redirect", "redirect_uri", "target"):
-                for cand in qs.get(key, []):
-                    cand = force_https(unquote(cand or ""))
-                    prof = _extract_x_profile(cand)
-                    if prof:
-                        return prof
-        except Exception:
-            pass
-
-        # head/get с редиректами
-        try:
-            r = requests.head(
-                uu, allow_redirects=True, timeout=timeout, headers={"User-Agent": UA}
-            )
-            final = r.url or uu
-        except Exception:
             r = requests.get(
                 uu, allow_redirects=True, timeout=timeout, headers={"User-Agent": UA}
             )
             final = r.url or uu
+        except Exception:
+            final = uu
 
-        # финальная попытка на итоговом URL
-        return _extract_x_profile(final)
+    return _extract_x_profile(final)
+
+
+def _extract_x_profile_from_text(html: str) -> str:
+    try:
+        m = re.search(
+            r"https?://(?:www\.)?(?:twitter\.com|x\.com)/([A-Za-z0-9_]{1,15})(?:[/?#]|\b)",
+            html or "",
+            flags=re.I,
+        )
+        return f"https://x.com/{m.group(1)}" if m else ""
     except Exception:
         return ""
 
@@ -88,20 +112,52 @@ def _extract_x_profile(u: str | None) -> str:
         return ""
     try:
         p = urlparse(s)
-        host = (p.netloc or "").split(":")[0].lower()
-        host = host.replace("www.", "")
-        # допустить twitter.com и его поддомены, а также x.com
+        host = (p.netloc or "").split(":")[0].lower().replace("www.", "")
         is_twitter = host == "twitter.com" or host.endswith(".twitter.com")
         is_x = host == "x.com"
         if not (is_twitter or is_x):
             return ""
-        # первый сегмент пути — это handle; игнорируем query/fragment
+
+        # https://x.com/<handle>
         seg = (p.path or "/").strip("/").split("/", 1)[0]
-        if not seg:
-            return ""
-        if not re.match(r"^[A-Za-z0-9_]{1,15}$", seg):
-            return ""
-        return f"https://x.com/{seg}"
+        if seg and re.match(r"^[A-Za-z0-9_]{1,15}$", seg):
+            return f"https://x.com/{seg}"
+
+        qs = dict(
+            [
+                (k.lower(), v)
+                for k, v in (
+                    [
+                        (kv.split("=", 1)[0], kv.split("=", 1)[1])
+                        for kv in (p.query or "").split("&")
+                        if "=" in kv
+                    ]
+                    or []
+                )
+            ]
+        )
+
+        from urllib.parse import parse_qs, unquote
+
+        q = parse_qs(p.query or "")
+        # intent/follow?screen_name=Handle
+        screen = (q.get("screen_name") or [""])[0].strip()
+        if screen and re.match(r"^[A-Za-z0-9_]{1,15}$", screen):
+            return f"https://x.com/{screen}"
+
+        # i/flow/login?redirect_after_login=%2FXPLA_Official
+        redir = (q.get("redirect_after_login") or [""])[0]
+        if redir:
+            redir = force_https(unquote(redir))
+            try:
+                rp = urlparse(redir)
+                rseg = (rp.path or "/").strip("/").split("/", 1)[0]
+                if rseg and re.match(r"^[A-Za-z0-9_]{1,15}$", rseg):
+                    return f"https://x.com/{rseg}"
+            except Exception:
+                pass
+
+        return ""
     except Exception:
         return ""
 
@@ -256,9 +312,17 @@ def fetch_url_html(url: str, *, prefer: str = "auto", timeout: int = 30) -> str:
     except Exception as e:
         logger.warning("requests error %s: %s", url, e)
 
-    # если соцлинков нет - пробуем Playwright (spa футеры, гидратация)
-    if (not html) or (not has_social_links(html)) or is_html_suspicious(html):
-        # html рендером
+    def _needs_browser_for_key_socials(html: str) -> bool:
+        low = (html or "").lower()
+        return not (
+            "twitter.com" in low
+            or "x.com" in low
+            or "discord.gg" in low
+            or "discord.com" in low
+        )
+
+    # если нет ключевых соцсетей (twitter/discord) — всё равно идём в Playwright
+    if (not html) or is_html_suspicious(html) or _needs_browser_for_key_socials(html):
         out = fetch_url_html_playwright(
             url, timeout=max(80, timeout), wait="networkidle", mode="html"
         )
@@ -448,10 +512,45 @@ def find_best_docs_link(soup: BeautifulSoup, base_url: str) -> str:
 
 # Парс соцсетей и docs из HTML сайта
 def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -> dict:
+    from urllib.parse import urljoin
+
+    # helpers
+    def _abs(base: str, u: str) -> str:
+        try:
+            if not isinstance(u, str) or not u:
+                return ""
+            return u if u.startswith("http") else urljoin(base, u)
+        except Exception:
+            return u or ""
+
+    def _resolve_external(u: str, want_hosts: tuple[str, ...], timeout: int = 8) -> str:
+        if not u:
+            return ""
+        try:
+            r = requests.head(
+                u, allow_redirects=True, timeout=timeout, headers={"User-Agent": UA}
+            )
+            final = r.url or u
+        except Exception:
+            try:
+                r = requests.get(
+                    u, allow_redirects=True, timeout=timeout, headers={"User-Agent": UA}
+                )
+                final = r.url or u
+            except Exception:
+                final = u
+        try:
+            h = urlparse(final).netloc.lower().replace("www.", "")
+            if any(h.endswith(d) for d in want_hosts):
+                return force_https(final)
+        except Exception:
+            pass
+        return ""
+
     # попытка распарсить как JSON
     try:
         j = json.loads(html or "")
-        # пакет браузера: {ok, html|text, ...} - достаем  dom и продолжаем обычный парсинг
+        # пакет браузера: {ok, html|text, ...} - достаем dom и продолжаем обычный парсинг
         if (
             isinstance(j, dict)
             and ("html" in j or "text" in j)
@@ -461,19 +560,25 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
 
         # соц-json (websiteURL присутствует) - аккуратно чистим/нормализуем и возвращаем
         elif isinstance(j, dict) and j.get("websiteURL"):
-            allowed = set(_SOCIAL_KEYS)
+            allowed = set(_SOCIAL_KEYS) | {"twitterAll"}
             j_clean: dict = {}
             for k, v in j.items():
                 if k in allowed and isinstance(v, (str, list)):
                     j_clean[k] = v
 
-            # https + twitter.com → x.com (только для известных ключей)
+            # абсолютные + https; twitter.com → x.com; списки тоже нормализуем
             for k, v in list(j_clean.items()):
                 if isinstance(v, str) and v:
-                    vv = force_https(v)
+                    vv = force_https(_abs(base_url, v))
                     if k == "twitterURL" and "twitter.com" in vv:
                         vv = vv.replace("twitter.com", "x.com")
                     j_clean[k] = vv
+                elif isinstance(v, list):
+                    j_clean[k] = [
+                        force_https(_abs(base_url, x))
+                        for x in v
+                        if isinstance(x, str) and x
+                    ]
 
             # валидация twitterURL: должен указывать на x.com/twitter.com
             if j_clean.get("twitterURL"):
@@ -506,11 +611,7 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
 
             for k in list(links.keys()) + ["documentURL"]:
                 if k in j_clean and j_clean[k]:
-                    links[k] = (
-                        force_https(j_clean[k])
-                        if isinstance(j_clean[k], str)
-                        else j_clean[k]
-                    )
+                    links[k] = j_clean[k] if isinstance(j_clean[k], str) else j_clean[k]
 
             # нормализуем twitterAll
             if isinstance(j_clean.get("twitterAll"), list):
@@ -524,11 +625,29 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
             if not links.get("twitterURL") and twitter_all:
                 links["twitterURL"] = twitter_all[0]
 
-            # финальная нормализация
+            # донастройка twitter
             if links.get("twitterURL"):
                 links["twitterURL"] = force_https(
                     links["twitterURL"].replace("twitter.com", "x.com")
                 )
+
+            # если discord пришел относительным/внутренним - разворачиваем до discord.gg/.com
+            if links.get("discordURL") and not re.search(
+                r"discord\.(gg|com)", links["discordURL"], re.I
+            ):
+                links["discordURL"] = force_https(_abs(base_url, links["discordURL"]))
+                if not re.search(r"discord\.(gg|com)", links["discordURL"], re.I):
+                    resolved = _resolve_external(
+                        links["discordURL"], ("discord.gg", "discord.com")
+                    )
+                    if resolved:
+                        links["discordURL"] = resolved
+
+            # финальная абсолютная нормализация (на всякий случай)
+            for k, v in list(links.items()):
+                if isinstance(v, str) and v:
+                    links[k] = force_https(_abs(base_url, v))
+
             if twitter_all:
                 links["twitterAll"] = list(dict.fromkeys(twitter_all))
 
@@ -580,11 +699,11 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
                     continue
 
                 if key == "twitterURL":
-                    # единая умная попытка извлечь профиль из href/редиректов/вложенных url
+                    # единая попытка извлечь профиль из href/редиректов/вложенных url
                     prof = _extract_x_profile(href) or _resolve_x_profile_via_redirect(
                         href
                     )
-                    # если по href пусто, но текст/aria намекают на Twitter - еще одна попытка
+                    # если по href пусто, но текст/aria намекают на Twitter — еще одна попытка
                     if (not prof) and (
                         ("twitter" in text)
                         or ("x(" in text)
@@ -596,11 +715,17 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
                     if prof:
                         links[key] = prof
                 else:
-                    if (
+                    matched = (
                         rx.search(href)
                         or rx.search(text)
                         or rx.search(rel)
                         or rx.search(aria)
+                    )
+                    if matched:
+                        links[key] = href
+                    # специальный случай: текст/aria явно говорят "discord", но href не на discord-домене (bit.ly и т.п.)
+                    elif key == "discordURL" and (
+                        "discord" in text or "discord" in aria
                     ):
                         links[key] = href
 
@@ -641,7 +766,15 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
             for key, rx in _SOCIAL_PATTERNS.items():
                 if key == "twitterURL":
                     continue
-                if not links[key] and rx.search(href):
+                if not links[key] and (
+                    rx.search(href) or rx.search(text) or rx.search(aria)
+                ):
+                    links[key] = href
+                elif (
+                    key == "discordURL"
+                    and not links[key]
+                    and ("discord" in text or "discord" in aria)
+                ):
                     links[key] = href
 
             # twitterAll - только канонический профиль
@@ -667,11 +800,78 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
                 links["twitterURL"] = prof
                 break
 
+    # абсолютный фолбэк по сырому html (если нет <a>, но URL есть в тексте)
+    if not links.get("twitterURL"):
+        prof = _extract_x_profile_from_text(html)
+        if prof:
+            links["twitterURL"] = prof
+
     # документация (лучшая ссылка)
     doc = find_best_docs_link(soup, base_url)
     links["documentURL"] = doc or ""
 
-    # fallback для главной: попросим браузерный парсер соцсетей
+    # если это главная и отсутствует хотя бы один из ключевых (twitter/discord) - дозаполняем из браузера
+    if is_main_page and (not links.get("twitterURL") or not links.get("discordURL")):
+        logger.info("browser_fetch socials partial fill: %s", base_url)
+        payload = fetch_url_html_playwright(
+            base_url, timeout=60, wait="networkidle", mode="socials"
+        )
+        try:
+            j2 = json.loads(payload or "") or {}
+        except Exception:
+            j2 = {}
+
+        if isinstance(j2, dict) and j2.get("websiteURL"):
+            # оставить только разрешённые ключи
+            allowed = set(_SOCIAL_KEYS) | {"twitterAll"}
+            j2 = {k: v for k, v in j2.items() if k in allowed}
+
+            # нормализация значений + абсолютные
+            for k, v in list(j2.items()):
+                if isinstance(v, str) and v:
+                    vv = force_https(_abs(base_url, v))
+                    if k == "twitterURL" and "twitter.com" in vv:
+                        vv = vv.replace("twitter.com", "x.com")
+                    j2[k] = vv
+                elif isinstance(v, list):
+                    j2[k] = [
+                        force_https(_abs(base_url, x))
+                        for x in v
+                        if isinstance(x, str) and x
+                    ]
+
+            # валидация/нормализация twitter профиля
+            if j2.get("twitterURL"):
+                prof = _extract_x_profile(
+                    j2["twitterURL"]
+                ) or _resolve_x_profile_via_redirect(j2["twitterURL"])
+                j2["twitterURL"] = prof or ""
+
+            # дозаполняем только пустые поля
+            for k in list(links.keys()):
+                if k in j2 and j2[k] and not links.get(k):
+                    links[k] = j2[k]
+
+            # добавим twitterAll, если пришёл
+            if isinstance(j2.get("twitterAll"), list) and j2["twitterAll"]:
+                links["twitterAll"] = list(
+                    dict.fromkeys(
+                        [
+                            force_https(u.replace("twitter.com", "x.com"))
+                            for u in j2["twitterAll"]
+                            if isinstance(u, str) and u
+                        ]
+                    )
+                )
+
+            # финальная нормализация
+            for k, v in list(links.items()):
+                if isinstance(v, str) and v:
+                    if k == "twitterURL":
+                        v = _extract_x_profile(v) or ""
+                    links[k] = force_https(_abs(base_url, v)) if v else ""
+
+    # fallback для главной: попросим браузерный парсер соцсетей (если совсем пусто)
     if is_main_page and all(
         not links[k] for k in links if k not in ("websiteURL", "documentURL")
     ):
@@ -694,7 +894,7 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
             # нормализация значений
             for k, v in list(j2.items()):
                 if isinstance(v, str) and v:
-                    vv = force_https(v)
+                    vv = force_https(_abs(base_url, v))
                     if k == "twitterURL" and "twitter.com" in vv:
                         vv = vv.replace("twitter.com", "x.com")
                     j2[k] = vv
@@ -731,7 +931,6 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
             # попробуем вычислить документацию по отрендеренному dom, если он был в payload
             html2 = ""
             try:
-                # payload - это json-строка от browser_fetch; достанем html/text при наличии
                 tmp = json.loads(payload or "") if payload else {}
                 if isinstance(tmp, dict):
                     html2 = tmp.get("html") or tmp.get("text") or ""
@@ -753,12 +952,12 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
                 if isinstance(v, str) and v:
                     if k == "twitterURL":
                         v = v.replace("twitter.com", "x.com")
-                    links[k] = force_https(v)
+                    links[k] = force_https(_abs(base_url, v))
             if twitter_all:
                 links["twitterAll"] = list(dict.fromkeys(twitter_all))
             return links
 
-        # если прилетел не соц-json, но есть html/text — второй круг по DOM из браузера
+        # если прилетел не соц-json, но есть html/text - второй круг по dom из браузера
         if isinstance(j2, dict) and ("html" in j2 or "text" in j2):
             html2 = j2.get("html") or j2.get("text") or ""
             if html2:
@@ -829,9 +1028,16 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
                         href = urljoin(base_url, a["href"])
                         for key, rx in _SOCIAL_PATTERNS.items():
                             if key == "twitterURL":
-                                # twitter - только через строгий разбор профиля/редирект
                                 continue
-                            if not links[key] and rx.search(href):
+                            if not links[key] and (
+                                rx.search(href) or rx.search(text) or rx.search(aria)
+                            ):
+                                links[key] = href
+                            elif (
+                                key == "discordURL"
+                                and not links[key]
+                                and ("discord" in text or "discord" in aria)
+                            ):
                                 links[key] = href
                         # просто соберем кандидатов в twitterAll, но не присваиваем twitterURL
                         if _SOCIAL_PATTERNS["twitterURL"].search(href):
@@ -859,19 +1065,59 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
                 if doc2 and not links.get("documentURL"):
                     links["documentURL"] = doc2
 
-    # финальная нормализация - все в https, twitter → x.com
-    if links.get("twitterURL"):
-        prof = _extract_x_profile(links["twitterURL"])
-        if not prof:
-            logger.warning("web: drop invalid twitterURL: %s", links["twitterURL"])
-            links["twitterURL"] = ""
-        else:
-            links["twitterURL"] = prof
+            # фолбэк: искать прямые профили X/Twitter в сыром HTML
+            if not links.get("twitterURL"):
+                m = re.search(
+                    r"https?://(?:www\.)?(?:twitter\.com|x\.com)/([A-Za-z0-9_]{1,15})(?:[/?#]|\b)",
+                    html or "",
+                    flags=re.I,
+                )
+                if m:
+                    links["twitterURL"] = f"https://x.com/{m.group(1)}"
+                else:
+                    for a in soup.find_all("a", href=True):
+                        text = (a.get_text(" ", strip=True) or "").lower()
+                        if (
+                            ("twitter" in text)
+                            or ("x(" in text)
+                            or ("x / twitter" in text)
+                            or ("x-twitter" in text)
+                        ):
+                            prof = _extract_x_profile(
+                                a["href"]
+                            ) or _resolve_x_profile_via_redirect(a["href"])
+                            if prof:
+                                links["twitterURL"] = prof
+                                break
 
-    # в остальном - обычная нормализация https
+            # финальная нормализация - все в https, twitter → x.com
+            if links.get("twitterURL"):
+                prof = _extract_x_profile(links["twitterURL"])
+                if not prof:
+                    logger.warning(
+                        "web: drop invalid twitterURL: %s", links["twitterURL"]
+                    )
+                    links["twitterURL"] = ""
+                else:
+                    links["twitterURL"] = prof
+
+    # финальный проход: абсолютный URL + https для всех строк
     for k, v in list(links.items()):
         if isinstance(v, str) and v:
-            links[k] = force_https(v)
+            vv = v if v.startswith("http") else urljoin(base_url, v)
+            links[k] = force_https(vv)
+
+    # если discord остался внутренним путем - разворачиваем
+    if links.get("discordURL") and not re.search(
+        r"discord\.(gg|com)", links["discordURL"], re.I
+    ):
+        links["discordURL"] = force_https(_abs(base_url, links["discordURL"]))
+        if not re.search(r"discord\.(gg|com)", links["discordURL"], re.I):
+            resolved = _resolve_external(
+                links["discordURL"], ("discord.gg", "discord.com")
+            )
+            if resolved:
+                links["discordURL"] = resolved
 
     # добавим twitterAll, если собрали несколько профилей на сайте
     if twitter_all:
