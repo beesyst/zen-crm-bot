@@ -114,11 +114,18 @@ def twitter_to_x(u: str | None) -> str:
     s = force_https(u.strip())
     if not s:
         return ""
-    # twitter.com → x.com
-    s = re.sub(r"^https://twitter\.com", "https://x.com", s, flags=re.I)
-    # уберем query/fragment
-    s = re.sub(r"[?#].*$", "", s)
-    return s.rstrip("/")
+
+    # только профиль, а не любой путь/домен
+    m = re.match(
+        r"^https://(?:www\.)?(?:twitter\.com|x\.com)/([A-Za-z0-9_]{1,15})/?$",
+        s,
+        re.I,
+    )
+    if not m:
+        return s.rstrip("/")
+
+    handle = m.group(1)
+    return f"https://x.com/{handle}"
 
 
 # Нормализация словаря соц-ссылок: https + уборка трекинга + трим/слэш

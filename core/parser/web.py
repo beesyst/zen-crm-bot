@@ -10,6 +10,7 @@ import requests
 from bs4 import BeautifulSoup
 from core.log_setup import get_logger
 from core.normalize import clean_project_name, force_https, is_bad_name
+from core.settings import get_settings
 
 logger = get_logger("web")
 
@@ -22,6 +23,11 @@ UA = (
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
+_CFG = get_settings() or {}
+_socials = _CFG.get("socials") or {}
+_SOCIAL_KEYS: tuple[str, ...] = tuple(_socials.get("keys") or ())
+_SOCIAL_HOSTS: tuple[str, ...] = tuple(_socials.get("social_hosts") or ())
+
 
 # Нормализованный хост из URL
 def _host(u: str) -> str:
@@ -31,7 +37,76 @@ def _host(u: str) -> str:
         return ""
 
 
-# Очень грубая эвристика подозрительного HTML (CF, редиректы и т.п.)
+# Если ссылка короткая (bit.ly/lnkd.in/…): редирект и возврат каноническего https://x.com/<handle>
+def _resolve_x_profile_via_redirect(u: str, timeout: int = 8) -> str:
+    try:
+        uu = force_https(u or "")
+        if not uu:
+            return ""
+        # быстрый кейс: вдруг уже профиль
+        prof = _extract_x_profile(uu)
+        if prof:
+            return prof
+
+        # попытка вытащить вшитые ссылки из query (?url=..., &to=..., &u=...)
+        from urllib.parse import parse_qs, unquote, urlparse
+
+        try:
+            p = urlparse(uu)
+            qs = parse_qs(p.query or "")
+            for key in ("url", "u", "to", "redirect", "redirect_uri", "target"):
+                for cand in qs.get(key, []):
+                    cand = force_https(unquote(cand or ""))
+                    prof = _extract_x_profile(cand)
+                    if prof:
+                        return prof
+        except Exception:
+            pass
+
+        # head/get с редиректами
+        try:
+            r = requests.head(
+                uu, allow_redirects=True, timeout=timeout, headers={"User-Agent": UA}
+            )
+            final = r.url or uu
+        except Exception:
+            r = requests.get(
+                uu, allow_redirects=True, timeout=timeout, headers={"User-Agent": UA}
+            )
+            final = r.url or uu
+
+        # финальная попытка на итоговом URL
+        return _extract_x_profile(final)
+    except Exception:
+        return ""
+
+
+# Строго парс профиль X/Twitter вида https://x.com/<handle>
+def _extract_x_profile(u: str | None) -> str:
+    s = force_https(u or "")
+    if not s:
+        return ""
+    try:
+        p = urlparse(s)
+        host = (p.netloc or "").split(":")[0].lower()
+        host = host.replace("www.", "")
+        # допустить twitter.com и его поддомены, а также x.com
+        is_twitter = host == "twitter.com" or host.endswith(".twitter.com")
+        is_x = host == "x.com"
+        if not (is_twitter or is_x):
+            return ""
+        # первый сегмент пути — это handle; игнорируем query/fragment
+        seg = (p.path or "/").strip("/").split("/", 1)[0]
+        if not seg:
+            return ""
+        if not re.match(r"^[A-Za-z0-9_]{1,15}$", seg):
+            return ""
+        return f"https://x.com/{seg}"
+    except Exception:
+        return ""
+
+
+# Грубая эвристика подозрительного HTML (CF, редиректы и т.п.)
 def is_html_suspicious(html: str) -> bool:
     if not html:
         return True
@@ -77,45 +152,14 @@ def is_html_suspicious(html: str) -> bool:
 # Быстрая проверка: есть ли ссылки на основные соцсети
 def has_social_links(html: str) -> bool:
     soup = BeautifulSoup(html or "", "html.parser")
+    host_set = set(_SOCIAL_HOSTS)
 
-    # быстро проверяем все <a href>
+    # есть соцсети только если есть реальный якорь <a href=...> на один из social_hosts
     for a in soup.find_all("a", href=True):
         h = _host(urljoin("https://example.org/", a["href"]))
-        if h in (
-            "x.com",
-            "twitter.com",
-            "discord.gg",
-            "discord.com",
-            "t.me",
-            "telegram.me",
-            "github.com",
-            "medium.com",
-            "youtube.com",
-            "youtu.be",
-            "linkedin.com",
-            "lnkd.in",
-            "reddit.com",
-        ):
+        if h in host_set:
             return True
 
-    # фолбэк: по сырому тексту
-    low = (html or "").lower()
-    for rx in (
-        r"(?:^|[^a-z0-9])x\.com(?:/|[^a-z0-9]|$)",
-        r"(?:^|[^a-z0-9])twitter\.com(?:/|[^a-z0-9]|$)",
-        r"(?:^|[^a-z0-9])discord\.(?:gg|com)(?:/|[^a-z0-9]|$)",
-        r"(?:^|[^a-z0-9])t\.me(?:/|[^a-z0-9]|$)",
-        r"(?:^|[^a-z0-9])telegram\.me(?:/|[^a-z0-9]|$)",
-        r"(?:^|[^a-z0-9])github\.com(?:/|[^a-z0-9]|$)",
-        r"(?:^|[^a-z0-9])medium\.com(?:/|[^a-z0-9]|$)",
-        r"(?:^|[^a-z0-9])youtube\.com(?:/|[^a-z0-9]|$)",
-        r"(?:^|[^a-z0-9])youtu\.be(?:/|[^a-z0-9]|$)",
-        r"(?:^|[^a-z0-9])linkedin\.com(?:/|[^a-z0-9]|$)",
-        r"(?:^|[^a-z0-9])lnkd\.in(?:/|[^a-z0-9]|$)",
-        r"(?:^|[^a-z0-9])reddit\.com(?:/|[^a-z0-9]|$)",
-    ):
-        if re.search(rx, low):
-            return True
     return False
 
 
@@ -247,9 +291,7 @@ def fetch_url_html(url: str, *, prefer: str = "auto", timeout: int = 30) -> str:
 
 # Регулярки для распознавания соцсетей
 _SOCIAL_PATTERNS = {
-    "twitterURL": re.compile(
-        r"(?:^|://)(?:www\.)?(?:x\.com|twitter\.com)(?:/|$)", re.I
-    ),
+    "twitterURL": re.compile(r"\b(?:twitter\.com|x\.com)\b", re.I),
     "discordURL": re.compile(r"(?:discord\.gg|discord\.com)", re.I),
     "telegramURL": re.compile(r"(?:t\.me|telegram\.me)", re.I),
     "youtubeURL": re.compile(r"(?:youtube\.com|youtu\.be)", re.I),
@@ -419,19 +461,7 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
 
         # соц-json (websiteURL присутствует) - аккуратно чистим/нормализуем и возвращаем
         elif isinstance(j, dict) and j.get("websiteURL"):
-            allowed = {
-                "websiteURL",
-                "twitterURL",
-                "discordURL",
-                "telegramURL",
-                "youtubeURL",
-                "linkedinURL",
-                "redditURL",
-                "mediumURL",
-                "githubURL",
-                "documentURL",
-                "twitterAll",
-            }
+            allowed = set(_SOCIAL_KEYS)
             j_clean: dict = {}
             for k, v in j.items():
                 if k in allowed and isinstance(v, (str, list)):
@@ -468,9 +498,10 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
                         break
 
             # собираем финальный словарь links из j_clean (без html/text и прочего мусора)
-            links = {k: "" for k in _SOCIAL_PATTERNS}
-            links["websiteURL"] = force_https(base_url)
-            links["documentURL"] = j_clean.get("documentURL", "") or ""
+            _init_keys = set(_SOCIAL_KEYS) | {"websiteURL", "documentURL"}
+            links = {k: "" for k in _init_keys if k != "twitterAll"}
+            links["websiteURL"] = base_url
+            links["documentURL"] = ""
             twitter_all: list[str] = []
 
             for k in list(links.keys()) + ["documentURL"]:
@@ -507,22 +538,17 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
 
     # обычный html → dom-парсинг зон
     soup = BeautifulSoup(html or "", "html.parser")
-    links = {k: "" for k in _SOCIAL_PATTERNS}
+    _init_keys = set(_SOCIAL_KEYS) | {"websiteURL", "documentURL"}
+    links = {k: "" for k in _init_keys if k != "twitterAll"}
     links["websiteURL"] = base_url
     links["documentURL"] = ""
     twitter_all: list[str] = []
 
     def _maybe_add_twitter(href_abs: str):
         try:
-            u = href_abs.replace("twitter.com", "x.com")
-            p = urlparse(u)
-            norm = f"{p.scheme}://{p.netloc}{p.path}".rstrip("/")
-            if re.match(
-                r"^https?://(?:www\.)?x\.com/([A-Za-z0-9_]{1,15})$", norm, re.I
-            ):
-                norm = force_https(norm)
-                if norm not in twitter_all:
-                    twitter_all.append(norm)
+            prof = _extract_x_profile(href_abs)
+            if prof and prof not in twitter_all:
+                twitter_all.append(prof)
         except Exception:
             pass
 
@@ -533,7 +559,8 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
     zones.extend(soup.select("header, header *, nav, nav *"))
     zones.extend(
         soup.select(
-            "[class*='social'], [class*='footer'], [class*='follow'], [data-testid*='footer']"
+            "[class*='social'], [class*='sns'], [class*='footer'], "
+            "[class*='follow'], [data-testid*='footer']"
         )
     )
     zones.append(soup.select_one("body > :first-child"))
@@ -553,10 +580,21 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
                     continue
 
                 if key == "twitterURL":
-                    # строго проверяем хост
-                    host = _host(href)
-                    if host in ("x.com", "twitter.com"):
-                        links[key] = href
+                    # единая умная попытка извлечь профиль из href/редиректов/вложенных url
+                    prof = _extract_x_profile(href) or _resolve_x_profile_via_redirect(
+                        href
+                    )
+                    # если по href пусто, но текст/aria намекают на Twitter - еще одна попытка
+                    if (not prof) and (
+                        ("twitter" in text)
+                        or ("x(" in text)
+                        or ("x / twitter" in text)
+                        or ("x-twitter" in text)
+                        or ("twitter" in aria)
+                    ):
+                        prof = _resolve_x_profile_via_redirect(href)
+                    if prof:
+                        links[key] = prof
                 else:
                     if (
                         rx.search(href)
@@ -566,8 +604,19 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
                     ):
                         links[key] = href
 
-            if _SOCIAL_PATTERNS["twitterURL"].search(href):
-                _maybe_add_twitter(href)
+            prof_for_all = _extract_x_profile(href)
+            if not prof_for_all:
+                # если текст/aria явно указывает на Twitter/X, попробуем развернуть коротыш
+                if (
+                    ("twitter" in text)
+                    or ("x(" in text)
+                    or ("x / twitter" in text)
+                    or ("x-twitter" in text)
+                    or ("twitter" in aria)
+                ):
+                    prof_for_all = _resolve_x_profile_via_redirect(href)
+            if prof_for_all:
+                _maybe_add_twitter(prof_for_all)
 
     for z in zones:
         _scan(z)
@@ -576,12 +625,18 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
     if all(not links[k] for k in links if k != "websiteURL"):
         for a in soup.find_all("a", href=True):
             href = urljoin(base_url, a["href"])
+            text = (a.get_text(" ", strip=True) or "").lower()
+            aria = (a.get("aria-label") or "").lower()
 
             # доменная проверка для твиттера
             if not links["twitterURL"]:
-                host = _host(href)
-                if host in ("x.com", "twitter.com"):
-                    links["twitterURL"] = href
+                prof = _extract_x_profile(href)
+                if not prof and (
+                    ("twitter" in text) or ("x(" in text) or ("twitter" in aria)
+                ):
+                    prof = _resolve_x_profile_via_redirect(href)
+                if prof:
+                    links["twitterURL"] = prof
 
             for key, rx in _SOCIAL_PATTERNS.items():
                 if key == "twitterURL":
@@ -589,8 +644,28 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
                 if not links[key] and rx.search(href):
                     links[key] = href
 
-            if _SOCIAL_PATTERNS["twitterURL"].search(href):
-                _maybe_add_twitter(href)
+            # twitterAll - только канонический профиль
+            prof_for_all = _extract_x_profile(href)
+            if not prof_for_all and (
+                ("twitter" in text) or ("x(" in text) or ("twitter" in aria)
+            ):
+                prof_for_all = _resolve_x_profile_via_redirect(href)
+            if prof_for_all:
+                _maybe_add_twitter(prof_for_all)
+
+    if not links.get("twitterURL"):
+        for a in soup.find_all("a", href=True):
+            href = urljoin(base_url, a["href"])
+            text = (a.get_text(" ", strip=True) or "").lower()
+            aria = (a.get("aria-label") or "").lower()
+            prof = _extract_x_profile(href) or _resolve_x_profile_via_redirect(href)
+            if (not prof) and (
+                ("twitter" in text) or ("x(" in text) or ("twitter" in aria)
+            ):
+                prof = _resolve_x_profile_via_redirect(href)
+            if prof:
+                links["twitterURL"] = prof
+                break
 
     # документация (лучшая ссылка)
     doc = find_best_docs_link(soup, base_url)
@@ -611,19 +686,7 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
 
         # если пришел соц-JSON - аккуратно смержим только разрешенные поля
         if isinstance(j2, dict) and j2.get("websiteURL"):
-            allowed = {
-                "websiteURL",
-                "twitterURL",
-                "discordURL",
-                "telegramURL",
-                "youtubeURL",
-                "linkedinURL",
-                "redditURL",
-                "mediumURL",
-                "githubURL",
-                "documentURL",
-                "twitterAll",
-            }
+            allowed = set(_SOCIAL_KEYS)
             for k in list(j2.keys()):
                 if k not in allowed:
                     j2.pop(k, None)
@@ -648,7 +711,14 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
             # мержим найденные соцсети в текущий словарь links (пустые не перетираем)
             for k in list(links.keys()):
                 if k in j2 and j2[k] and not links.get(k):
-                    links[k] = j2[k]
+                    if k == "twitterURL":
+                        prof = _extract_x_profile(
+                            j2[k]
+                        ) or _resolve_x_profile_via_redirect(j2[k])
+                        if prof:
+                            links[k] = prof
+                    else:
+                        links[k] = j2[k]
 
             # домержим twitterAll
             if isinstance(j2.get("twitterAll"), list):
@@ -702,7 +772,8 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
                 )
                 zones2.extend(
                     soup2.select(
-                        "[class*='social'], [class*='footer'], [class*='follow'], [data-testid*='footer']"
+                        "[class*='social'], [class*='sns'], [class*='footer'], "
+                        "[class*='follow'], [data-testid*='footer']"
                     )
                 )
 
@@ -714,6 +785,7 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
                         text = (a.get_text(" ", strip=True) or "").lower()
                         rel = " ".join(a.get("rel") or []).lower()
                         aria = (a.get("aria-label") or "").lower()
+
                         for key, rx in _SOCIAL_PATTERNS.items():
                             if not links[key] and (
                                 rx.search(href)
@@ -721,9 +793,29 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
                                 or rx.search(rel)
                                 or rx.search(aria)
                             ):
-                                links[key] = href
-                        if _SOCIAL_PATTERNS["twitterURL"].search(href):
-                            _maybe_add_twitter(href)
+                                if key == "twitterURL":
+                                    prof = _extract_x_profile(href) or (
+                                        _resolve_x_profile_via_redirect(href)
+                                        if (
+                                            ("twitter" in text)
+                                            or ("x(" in text)
+                                            or ("twitter" in aria)
+                                        )
+                                        else ""
+                                    )
+                                    if prof:
+                                        links[key] = prof
+                                else:
+                                    links[key] = href
+
+                        # twitterAll - строго через профиль/редирект
+                        prof_for_all = _extract_x_profile(href)
+                        if not prof_for_all and (
+                            ("twitter" in text) or ("x(" in text) or ("twitter" in aria)
+                        ):
+                            prof_for_all = _resolve_x_profile_via_redirect(href)
+                        if prof_for_all:
+                            _maybe_add_twitter(prof_for_all)
 
                 for z in zones2:
                     _scan2(z)
@@ -736,10 +828,31 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
                     for a in soup2.find_all("a", href=True):
                         href = urljoin(base_url, a["href"])
                         for key, rx in _SOCIAL_PATTERNS.items():
+                            if key == "twitterURL":
+                                # twitter - только через строгий разбор профиля/редирект
+                                continue
                             if not links[key] and rx.search(href):
                                 links[key] = href
+                        # просто соберем кандидатов в twitterAll, но не присваиваем twitterURL
                         if _SOCIAL_PATTERNS["twitterURL"].search(href):
                             _maybe_add_twitter(href)
+
+                # если после сканирования зон twitterURL не найден - пройдем весь dom только под twitter
+                if not links.get("twitterURL"):
+                    for a in soup2.find_all("a", href=True):
+                        href = urljoin(base_url, a["href"])
+                        text = (a.get_text(" ", strip=True) or "").lower()
+                        aria = (a.get("aria-label") or "").lower()
+                        prof = _extract_x_profile(
+                            href
+                        ) or _resolve_x_profile_via_redirect(href)
+                        if (not prof) and (
+                            ("twitter" in text) or ("x(" in text) or ("twitter" in aria)
+                        ):
+                            prof = _resolve_x_profile_via_redirect(href)
+                        if prof:
+                            links["twitterURL"] = prof
+                            break
 
                 # повторно docs по рендеренному dom
                 doc2 = find_best_docs_link(soup2, base_url)
@@ -747,23 +860,18 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
                     links["documentURL"] = doc2
 
     # финальная нормализация - все в https, twitter → x.com
-    for k, v in list(links.items()):
-        if isinstance(v, str) and v:
-            if k == "twitterURL":
-                v = v.replace("twitter.com", "x.com")
-            links[k] = force_https(v)
-
-    # если нет twitterURL, но собран twitterAll - используем первый
-    if not links.get("twitterURL") and twitter_all:
-        links["twitterURL"] = twitter_all[0]
-
-    # хард проверка: twitterURL только вида https://x.com/<handle>
     if links.get("twitterURL"):
-        if not re.match(
-            r"^https?://(?:www\.)?x\.com/[A-Za-z0-9_]{1,15}$", links["twitterURL"], re.I
-        ):
+        prof = _extract_x_profile(links["twitterURL"])
+        if not prof:
             logger.warning("web: drop invalid twitterURL: %s", links["twitterURL"])
             links["twitterURL"] = ""
+        else:
+            links["twitterURL"] = prof
+
+    # в остальном - обычная нормализация https
+    for k, v in list(links.items()):
+        if isinstance(v, str) and v:
+            links[k] = force_https(v)
 
     # добавим twitterAll, если собрали несколько профилей на сайте
     if twitter_all:

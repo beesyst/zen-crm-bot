@@ -94,7 +94,11 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
                     main_data["socialLinks"][k] = ""
                 main_data["socialLinks"][k] = v.strip()
 
-        # начальное обогащение по сайту (до проверки X/агрегаторов)
+        # подчистим до лога: запретим не-профильный twitterURL
+        tw0 = main_data["socialLinks"].get("twitterURL", "")
+        if tw0 and not re.match(r"^https?://(?:www\.)?x\.com/[A-Za-z0-9_]{1,15}$", tw0, re.I):
+            main_data["socialLinks"]["twitterURL"] = ""
+
         logger.info(
             "Начальное обогащение %s: %s",
             website_url,
