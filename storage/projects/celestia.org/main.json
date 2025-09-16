@@ -14,12 +14,10 @@
   },
   "contacts": {
     "contactEmail": "",
-    "contactFormURL": ""
+    "contactFormURL": "",
+    "persons": [],
+    "emails": [],
+    "forms": []
   },
-  "shortDescription": "",
-  "contentMarkdown": "",
-  "seo": {},
-  "coinData": {},
-  "videoSlider": [],
   "svgLogo": "celestia.jpg"
 }

@@ -137,6 +137,11 @@ def enrich_company_by_url(
     data = collect_main_data(url, template, str(project_dir))
 
     prev = _read_json(main_path) if main_path.exists() else {}
+    if prev.get("contacts"):
+        data.setdefault("contacts", {})
+        for key in ("emails", "forms", "persons"):
+            if not data["contacts"].get(key):
+                data["contacts"][key] = prev["contacts"].get(key, [])
     json_changed = _is_changed(prev, data)
     if json_changed or not main_path.exists():
         _write_json(main_path, data)

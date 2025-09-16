@@ -14,6 +14,7 @@
   },
   "contacts": {
     "contactEmail": "",
-    "contactFormURL": ""
+    "contactFormURL": "",
+    "persons": []
   }
 }

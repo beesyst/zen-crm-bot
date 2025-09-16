@@ -97,3 +97,24 @@ def get_nitter_cfg() -> dict:
     if "bad_ttl_sec" in n:
         out["bad_ttl_sec"] = int(n.get("bad_ttl_sec"))
     return out
+
+
+# Словарь ролей контактов из settings.yml (contacts.roles)
+def get_contact_roles() -> Dict[str, list[str]]:
+    roles = ((get_settings().get("contacts") or {}).get("roles")) or {}
+    out: Dict[str, list[str]] = {}
+    for role, tokens in roles.items() if isinstance(roles, dict) else []:
+        if not isinstance(role, str) or not role.strip():
+            continue
+        seen = set()
+        lst: list[str] = []
+        for t in tokens or []:
+            if not isinstance(t, str):
+                continue
+            tt = t.strip().lower()
+            if tt and tt not in seen:
+                lst.append(tt)
+                seen.add(tt)
+        if lst:
+            out[role.strip().lower()] = lst
+    return out

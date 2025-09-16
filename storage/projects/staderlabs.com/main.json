@@ -14,12 +14,12 @@
   },
   "contacts": {
     "contactEmail": "",
-    "contactFormURL": ""
+    "contactFormURL": "",
+    "persons": [],
+    "emails": [
+      "admin@staderlabs.com"
+    ],
+    "forms": []
   },
-  "shortDescription": "",
-  "contentMarkdown": "",
-  "seo": {},
-  "coinData": {},
-  "videoSlider": [],
   "svgLogo": "staderlabs.jpg"
 }

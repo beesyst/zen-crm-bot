@@ -1128,6 +1128,9 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
     if twitter_all:
         links["twitterAll"] = list(dict.fromkeys(twitter_all))
 
+    logger.info(
+        "Начальное обогащение %s: %s", base_url, {k: v for k, v in links.items() if v}
+    )
     return links
 
 

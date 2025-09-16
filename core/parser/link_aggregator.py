@@ -7,7 +7,12 @@ import requests
 from bs4 import BeautifulSoup
 from core.log_setup import get_logger
 from core.normalize import force_https, normalize_url, twitter_to_x
-from core.settings import get_link_collections, get_social_hosts, get_social_keys
+from core.settings import (
+    get_contact_roles,
+    get_link_collections,
+    get_social_hosts,
+    get_social_keys,
+)
 
 logger = get_logger("link_aggregator")
 
@@ -212,6 +217,104 @@ def extract_socials_from_aggregator(agg_url: str) -> dict:
 
     # финальная нормализация
     return _normalize_socials_dict(out)
+
+
+# Контакты (email + persons) из агрегатора по конфигу roles
+def extract_contacts_from_aggregator(agg_url: str) -> dict:
+    html = _fetch_html(agg_url)
+    res = {"emails": [], "persons": []}
+    if not html:
+        logger.info(
+            "Агрегатор контакты %s: %s",
+            agg_url,
+            {"emails": res.get("emails", []), "persons": res.get("persons", [])},
+        )
+        return res
+
+    soup = BeautifulSoup(html, "html.parser")
+    roles_map = get_contact_roles()
+
+    EMAIL_RX = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.I)
+
+    def _resolve_role(text_or_href: str) -> str:
+        s = (text_or_href or "").lower()
+        for role, tokens in roles_map.items():
+            if any(tok in s for tok in tokens):
+                return role
+        return ""
+
+    def _mk_person(name: str, role: str, **channels):
+        person = {"name": name, "role": role, "source": _host(agg_url)}
+        for k, v in channels.items():
+            if v:
+                person[k] = normalize_url(v)
+        return person
+
+    # email (mailto / текст)
+    for a in soup.find_all("a", href=True):
+        href = a["href"] or ""
+        if href.lower().startswith("mailto:"):
+            mail = href.split(":", 1)[-1].strip()
+            if EMAIL_RX.fullmatch(mail):
+                res["contactEmail"] = mail
+                break
+    if not res["contactEmail"]:
+        m = EMAIL_RX.search(soup.get_text(" ", strip=True) or "")
+        if m:
+            res["contactEmail"] = m.group(0)
+
+    # персональные каналы по ролям
+    for a in soup.find_all("a", href=True):
+        text = a.get_text(" ", strip=True) or ""
+        href_abs = normalize_url(urljoin(agg_url, a["href"]))
+        h = _host(href_abs)
+        role = _resolve_role(text) or _resolve_role(href_abs)
+
+        if not role:
+            continue
+
+        # подобрать имя
+        name = "Support" if role == "support" else (text.strip() or role.title())
+
+        if h in ("t.me", "telegram.me"):
+            res["persons"].append(_mk_person(name, role, telegram=href_abs))
+        elif h in ("discord.gg", "discord.com"):
+            res["persons"].append(_mk_person(name, role, discord=href_abs))
+        elif h in ("x.com", "twitter.com"):
+            res["persons"].append(_mk_person(name, role, x=twitter_to_x(href_abs)))
+        elif h in ("linkedin.com", "lnkd.in"):
+            res["persons"].append(_mk_person(name, role, linkedin=href_abs))
+        else:
+            # общий сайт/форма контакта
+            if href_abs.startswith("http"):
+                res["persons"].append(_mk_person(name, role, website=href_abs))
+
+    # дедуп по (role, основной канал)
+    seen = set()
+    deduped = []
+
+    def _key(p):
+        return (
+            (p.get("role") or "").lower(),
+            (
+                p.get("email")
+                or p.get("telegram")
+                or p.get("discord")
+                or p.get("linkedin")
+                or p.get("x")
+                or p.get("website")
+                or ""
+            ).lower(),
+        )
+
+    for p in res["persons"]:
+        k = _key(p)
+        if k and k not in seen:
+            seen.add(k)
+            deduped.append(p)
+    res["persons"] = deduped
+
+    return res
 
 
 # Find + verify
