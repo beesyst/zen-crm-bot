@@ -666,13 +666,15 @@ def verify_twitter_and_enrich(
 
     # если X подтверждён по сайту или по агрегатору - лог один раз и возвращаем
     if confirmed_by_site or enriched_bits:
-        # если офсайт подтвержден, но websiteURL в обогащении пуст - допишем
         if (
             confirmed_by_site
             and site_domain_norm
             and not enriched_bits.get("websiteURL")
         ):
-            enriched_bits["websiteURL"] = f"https://www.{site_domain_norm}/"
+            # всегда корень, без путей
+            enriched_bits["websiteURL"] = f"https://{site_domain_norm}/".replace(
+                "//www.", "//"
+            )
         logger.info("X подтвержден: %s", twitter_url)
         return True, enriched_bits, agg_used
 
@@ -688,7 +690,7 @@ def verify_twitter_and_enrich(
                 out[k] = v
         return out
 
-    # Проверяем каждый агрегатор: жёстко → мягко → soft-policy из BIO
+    # Проверяем каждый агрегатор: жёстко → мягко → soft-policy из bio
     for agg in aggs:
         agg_norm = force_https(agg)
 

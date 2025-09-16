@@ -182,13 +182,33 @@ def extract_socials_from_aggregator(agg_url: str) -> dict:
             _emit(og["content"])
 
     # выберем лучший websiteURL
+    def _score(u: str) -> tuple[int, int]:
+        try:
+            p = urlparse(u)
+            host = (p.netloc or "").lower().replace("www.", "")
+            path = (p.path or "/").strip("/")
+            # penalty за субдомен (docs/blog/help/wiki и любые поддомены)
+            sub_penalty = 0
+            if "." in host:
+                sub_penalty = 2
+            if host.startswith(("docs.", "blog.", "help.", "wiki.")):
+                sub_penalty = 3
+            # глубина пути
+            depth = 0 if not path else len([s for s in path.split("/") if s])
+            return (sub_penalty, depth)
+        except Exception:
+            return (9, 9)
+
     if candidate_sites:
+        uniq = []
         seen = set()
         for u in candidate_sites:
             uu = normalize_url(u)
             if uu and uu not in seen:
-                out["websiteURL"] = uu
-                break
+                uniq.append(uu)
+                seen.add(uu)
+        uniq.sort(key=_score)
+        out["websiteURL"] = uniq[0]
 
     # финальная нормализация
     return _normalize_socials_dict(out)

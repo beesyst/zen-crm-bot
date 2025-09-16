@@ -61,6 +61,20 @@ def normalize_url(u: str | None) -> str:
         return ""
     s = _strip_tracking_params(s)
     s = twitter_to_x(s)
+
+    # спец-правило для medium: оставляем только корень публикации/организации
+    try:
+        p = urlparse(s)
+        host = (p.netloc or "").lower().replace("www.", "")
+        if host.endswith("medium.com"):
+            # /pub/slug... -> /pub
+            # /@user/slug... -> /@user
+            parts = [seg for seg in (p.path or "/").split("/") if seg]
+            keep = ("/" + parts[0]) if parts else "/"
+            s = urlunparse(p._replace(path=keep, params="", query="", fragment=""))
+    except Exception:
+        pass
+
     return s.rstrip("/")
 
 
