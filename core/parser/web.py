@@ -4,7 +4,7 @@ import json
 import os
 import re
 import subprocess
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -122,22 +122,6 @@ def _extract_x_profile(u: str | None) -> str:
         seg = (p.path or "/").strip("/").split("/", 1)[0]
         if seg and re.match(r"^[A-Za-z0-9_]{1,15}$", seg):
             return f"https://x.com/{seg}"
-
-        qs = dict(
-            [
-                (k.lower(), v)
-                for k, v in (
-                    [
-                        (kv.split("=", 1)[0], kv.split("=", 1)[1])
-                        for kv in (p.query or "").split("&")
-                        if "=" in kv
-                    ]
-                    or []
-                )
-            ]
-        )
-
-        from urllib.parse import parse_qs, unquote
 
         q = parse_qs(p.query or "")
         # intent/follow?screen_name=Handle
@@ -596,13 +580,13 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
                 j_clean.get("twitterAll"), list
             ):
                 for u in j_clean["twitterAll"]:
-                    if isinstance(u, str) and re.search(
-                        r"(?:x\.com|twitter\.com)/", u, re.I
-                    ):
-                        j_clean["twitterURL"] = force_https(
-                            u.replace("twitter.com", "x.com")
+                    if isinstance(u, str) and u:
+                        prof = _extract_x_profile(u) or _resolve_x_profile_via_redirect(
+                            u
                         )
-                        break
+                        if prof:
+                            j_clean["twitterURL"] = prof
+                            break
 
             # собираем финальный словарь links из j_clean (без html/text и прочего мусора)
             _init_keys = set(_SOCIAL_KEYS) | {"websiteURL", "documentURL"}
@@ -1036,11 +1020,18 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
                 ):
                     for a in soup2.find_all("a", href=True):
                         href = urljoin(base_url, a["href"])
+                        text = (a.get_text(" ", strip=True) or "").lower()
+                        rel = " ".join(a.get("rel") or []).lower()
+                        aria = (a.get("aria-label") or "").lower()
+
                         for key, rx in _SOCIAL_PATTERNS.items():
                             if key == "twitterURL":
                                 continue
                             if not links[key] and (
-                                rx.search(href) or rx.search(text) or rx.search(aria)
+                                rx.search(href)
+                                or rx.search(text)
+                                or rx.search(rel)
+                                or rx.search(aria)
                             ):
                                 links[key] = href
                             elif (
@@ -1049,6 +1040,7 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
                                 and ("discord" in text or "discord" in aria)
                             ):
                                 links[key] = href
+
                         # просто соберем кандидатов в twitterAll, но не присваиваем twitterURL
                         if _SOCIAL_PATTERNS["twitterURL"].search(href):
                             _maybe_add_twitter(href)
