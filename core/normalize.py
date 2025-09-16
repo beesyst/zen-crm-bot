@@ -115,17 +115,74 @@ def twitter_to_x(u: str | None) -> str:
     if not s:
         return ""
 
-    # только профиль, а не любой путь/домен
+    # прямой профиль /<handle>
     m = re.match(
-        r"^https://(?:www\.)?(?:twitter\.com|x\.com)/([A-Za-z0-9_]{1,15})/?$",
+        r"^https://(?:www\.)?(?:twitter\.com|x\.com)/([A-Za-z0-9_]{1,15})(?:[/?#].*)?$",
         s,
         re.I,
     )
-    if not m:
-        return s.rstrip("/")
+    if m:
+        return f"https://x.com/{m.group(1)}"
 
-    handle = m.group(1)
-    return f"https://x.com/{handle}"
+    # intent/follow?screen_name=<handle>
+    m = re.match(
+        r"^https://(?:www\.)?twitter\.com/(?:intent/follow|intent/user)\b", s, re.I
+    )
+    if m:
+        from urllib.parse import parse_qs, urlparse
+
+        try:
+            qs = parse_qs(urlparse(s).query or "")
+            screen = (qs.get("screen_name") or [""])[0].strip()
+            if screen and re.match(r"^[A-Za-z0-9_]{1,15}$", screen):
+                return f"https://x.com/{screen}"
+        except Exception:
+            pass
+
+    # i/flow/login?redirect_after_login=%2F<handle>
+    if "redirect_after_login" in s:
+        from urllib.parse import parse_qs, unquote, urlparse
+
+        try:
+            qs = parse_qs(urlparse(s).query or "")
+            redir = (qs.get("redirect_after_login") or [""])[0]
+            if redir:
+                redir = force_https(unquote(redir))
+                m2 = re.match(
+                    r"^https://(?:www\.)?(?:twitter\.com|x\.com)/([A-Za-z0-9_]{1,15})(?:[/?#].*)?$",
+                    redir,
+                    re.I,
+                )
+                if m2:
+                    return f"https://x.com/{m2.group(1)}"
+                # если там просто "/<handle>"
+                m3 = re.match(r"^/([A-Za-z0-9_]{1,15})(?:[/?#].*)?$", redir)
+                if m3:
+                    return f"https://x.com/{m3.group(1)}"
+        except Exception:
+            pass
+
+    # generic ?url|u|to|target|redirect|redirect_uri=<twitter/x профиль>
+    if "?" in s:
+        from urllib.parse import parse_qs, unquote, urlparse
+
+        try:
+            qs = parse_qs(urlparse(s).query or "")
+            for key in ("url", "u", "to", "target", "redirect", "redirect_uri"):
+                for cand in qs.get(key, []):
+                    cand = force_https(unquote(cand or ""))
+                    m4 = re.match(
+                        r"^https://(?:www\.)?(?:twitter\.com|x\.com)/([A-Za-z0-9_]{1,15})(?:[/?#].*)?$",
+                        cand,
+                        re.I,
+                    )
+                    if m4:
+                        return f"https://x.com/{m4.group(1)}"
+        except Exception:
+            pass
+
+    # иначе - просто чистим хвосты, но без насильной канонизации
+    return s.rstrip("/")
 
 
 # Нормализация словаря соц-ссылок: https + уборка трекинга + трим/слэш

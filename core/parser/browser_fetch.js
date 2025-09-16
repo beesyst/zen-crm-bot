@@ -69,8 +69,47 @@ async function detectAntiBot(page, response) {
 
 // Нормализация twitter → x.com
 function normalizeTwitter(u) {
-  try { return u.replace(/https?:\/\/(www\.)?twitter\.com/i, 'https://x.com'); }
-  catch { return u; }
+  try {
+    if (!u) return u;
+    const s = String(u);
+    // прямой профиль
+    let m = s.match(/^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([A-Za-z0-9_]{1,15})(?:[\/?#].*)?$/i);
+    if (m) return `https://x.com/${m[1]}`;
+
+    // intent/follow?screen_name=
+    if (/^https?:\/\/(?:www\.)?twitter\.com\/intent\/(?:follow|user)/i.test(s)) {
+      const url = new URL(s);
+      const screen = (url.searchParams.get('screen_name') || '').trim();
+      if (/^[A-Za-z0-9_]{1,15}$/.test(screen)) return `https://x.com/${screen}`;
+    }
+
+    // i/flow/login?redirect_after_login=%2F<handle>
+    if (s.includes('redirect_after_login')) {
+      const url = new URL(s);
+      const redir = url.searchParams.get('redirect_after_login') || '';
+      const dec = decodeURIComponent(redir || '');
+      let m2 = dec.match(/^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([A-Za-z0-9_]{1,15})(?:[\/?#].*)?$/i);
+      if (m2) return `https://x.com/${m2[1]}`;
+      let m3 = dec.match(/^\/([A-Za-z0-9_]{1,15})(?:[\/?#].*)?$/);
+      if (m3) return `https://x.com/${m3[1]}`;
+    }
+
+    // generic query контейнеры
+    if (s.includes('?')) {
+      const url = new URL(s);
+      for (const key of ['url','u','to','target','redirect','redirect_uri']) {
+        const cand = url.searchParams.get(key);
+        if (cand) {
+          const dec = decodeURIComponent(cand);
+          const mm = dec.match(/^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([A-Za-z0-9_]{1,15})(?:[\/?#].*)?$/i);
+          if (mm) return `https://x.com/${mm[1]}`;
+        }
+      }
+    }
+
+    // fallback: просто twitter.com → x.com
+    return s.replace(/https?:\/\/(www\.)?twitter\.com/i, 'https://x.com').replace(/[\/?#].*$/, '');
+  } catch { return u; }
 }
 
 // Основная функция: навигация, рендер и сбор данных

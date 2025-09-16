@@ -570,8 +570,12 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
             for k, v in list(j_clean.items()):
                 if isinstance(v, str) and v:
                     vv = force_https(_abs(base_url, v))
-                    if k == "twitterURL" and "twitter.com" in vv:
-                        vv = vv.replace("twitter.com", "x.com")
+                    if k == "twitterURL":
+                        # канонизация профиля (intent/login/редиректы → https://x.com/<handle>)
+                        prof = _extract_x_profile(
+                            vv
+                        ) or _resolve_x_profile_via_redirect(vv)
+                        vv = prof or ""
                     j_clean[k] = vv
                 elif isinstance(v, list):
                     j_clean[k] = [
@@ -582,12 +586,10 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
 
             # валидация twitterURL: должен указывать на x.com/twitter.com
             if j_clean.get("twitterURL"):
-                if not re.search(
-                    r"(?:^https?://)?(?:www\.)?(?:x\.com|twitter\.com)/",
-                    j_clean["twitterURL"],
-                    re.I,
-                ):
-                    j_clean["twitterURL"] = ""
+                prof = _extract_x_profile(
+                    j_clean["twitterURL"]
+                ) or _resolve_x_profile_via_redirect(j_clean["twitterURL"])
+                j_clean["twitterURL"] = prof or ""
 
             # если нет twitterURL, но есть twitterAll - возьмем первый валидный
             if (not j_clean.get("twitterURL")) and isinstance(
@@ -850,7 +852,15 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
             # дозаполняем только пустые поля
             for k in list(links.keys()):
                 if k in j2 and j2[k] and not links.get(k):
-                    links[k] = j2[k]
+                    if k == "twitterURL":
+                        # страхуемся: записываем только канонический профиль
+                        prof = _extract_x_profile(
+                            j2[k]
+                        ) or _resolve_x_profile_via_redirect(j2[k])
+                        if prof:
+                            links[k] = prof
+                    else:
+                        links[k] = j2[k]
 
             # добавим twitterAll, если пришёл
             if isinstance(j2.get("twitterAll"), list) and j2["twitterAll"]:
@@ -1105,7 +1115,10 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
     for k, v in list(links.items()):
         if isinstance(v, str) and v:
             vv = v if v.startswith("http") else urljoin(base_url, v)
-            links[k] = force_https(vv)
+            vv = force_https(vv)
+            if k == "twitterURL":
+                vv = _extract_x_profile(vv) or _resolve_x_profile_via_redirect(vv) or ""
+            links[k] = vv
 
     # если discord остался внутренним путем - разворачиваем
     if links.get("discordURL") and not re.search(

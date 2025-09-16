@@ -9,7 +9,7 @@ import traceback
 from core.log_setup import get_logger
 
 # Нормализация ссылок/бренда
-from core.normalize import brand_from_url, force_https, normalize_socials
+from core.normalize import brand_from_url, force_https, normalize_socials, twitter_to_x
 
 # Работа с линк-агрегаторами
 from core.parser.link_aggregator import is_link_aggregator
@@ -93,11 +93,6 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
                 if k not in main_data["socialLinks"]:
                     main_data["socialLinks"][k] = ""
                 main_data["socialLinks"][k] = v.strip()
-
-        # подчистим до лога: запретим не-профильный twitterURL
-        tw0 = main_data["socialLinks"].get("twitterURL", "")
-        if tw0 and not re.match(r"^https?://(?:www\.)?x\.com/[A-Za-z0-9_]{1,15}$", tw0, re.I):
-            main_data["socialLinks"]["twitterURL"] = ""
 
         logger.info(
             "Начальное обогащение %s: %s",
@@ -314,6 +309,11 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
             main_data["socialLinks"][k] = force_https(v)
 
     # Хард-чек: twitterURL строго https://x.com/<handle>
+    tw = main_data["socialLinks"].get("twitterURL", "")
+    if isinstance(tw, str) and tw:
+        tw_canon = twitter_to_x(tw)
+        main_data["socialLinks"]["twitterURL"] = tw_canon
+
     tw = main_data["socialLinks"].get("twitterURL", "")
     if isinstance(tw, str) and tw:
         if not re.match(r"^https?://(?:www\.)?x\.com/[A-Za-z0-9_]{1,15}$", tw, re.I):

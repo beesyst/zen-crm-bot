@@ -93,8 +93,27 @@ def extract_socials_from_aggregator(agg_url: str) -> dict:
 
     candidate_sites: list[str] = []
 
+    # выдергиваем целевой URL из типовых редиректоров агрегаторов (?url=, ?u=, ?to=, ?target=, ?redirect=, ?redirect_uri=)
+    def _unwrap_redirect(u: str) -> str:
+        try:
+            from urllib.parse import parse_qs, unquote, urlparse
+
+            p = urlparse(u)
+            qs = parse_qs(p.query or "")
+            for key in ("url", "u", "to", "target", "redirect", "redirect_uri"):
+                for cand in qs.get(key, []):
+                    cand = force_https(unquote(cand or ""))
+                    if cand:
+                        return cand
+        except Exception:
+            pass
+        return u
+
     def _emit(href: str):
-        u = normalize_url(urljoin(agg_url, href))
+        raw = urljoin(agg_url, href)
+        # сначала разворачиваем возможный редиректор агрегатора
+        raw = _unwrap_redirect(raw)
+        u = normalize_url(raw)  # внутри вызовется twitter_to_x()
         if not u:
             return
         h = _host(u)
