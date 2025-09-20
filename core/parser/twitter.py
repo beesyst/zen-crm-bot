@@ -666,13 +666,8 @@ def verify_twitter_and_enrich(
 
     # если X подтверждён по сайту или по агрегатору - лог один раз и возвращаем
     if confirmed_by_site or enriched_bits:
-        if (
-            confirmed_by_site
-            and site_domain_norm
-            and not enriched_bits.get("websiteURL")
-        ):
-            # всегда корень, без путей
-            enriched_bits["websiteURL"] = f"https://{site_domain_norm}/".replace(
+        if confirmed_by_site and site_domain_norm and not enriched_bits.get("website"):
+            enriched_bits["website"] = f"https://{site_domain_norm}/".replace(
                 "//www.", "//"
             )
         logger.info("X подтвержден: %s", twitter_url)
@@ -681,13 +676,24 @@ def verify_twitter_and_enrich(
     def _normalize_socials(d: dict) -> dict:
         out = {}
         for k, v in (d or {}).items():
-            if isinstance(v, str) and v:
-                vv = force_https(v)
-                if k == "twitterURL":
-                    vv = vv.replace("twitter.com", "x.com")
+            if not isinstance(v, str) or not v:
+                continue
+            vv = force_https(v)
+            if k == "twitter":
+                vv = vv.replace("twitter.com", "x.com")
+            if k in (
+                "website",
+                "document",
+                "twitter",
+                "discord",
+                "telegram",
+                "youtube",
+                "linkedin",
+                "reddit",
+                "medium",
+                "github",
+            ):
                 out[k] = vv
-            else:
-                out[k] = v
         return out
 
     # Проверяем каждый агрегатор: жёстко → мягко → soft-policy из bio
@@ -719,7 +725,7 @@ def verify_twitter_and_enrich(
 
             # твиттер того же хэндла
             try:
-                tw_u = try_bits.get("twitterURL", "") or ""
+                tw_u = try_bits.get("twitter", "") or ""
                 if handle and isinstance(tw_u, str):
                     if re.search(
                         r"(?:x\.com|twitter\.com)/" + re.escape(handle) + r"(?:/|$)",
@@ -741,7 +747,7 @@ def verify_twitter_and_enrich(
         if ok:
             bits = _normalize_socials(bits)
 
-            # если офсайт подтвержден, но websiteURL пуст - проставим
+            # если офсайт подтвержден, но website пуст - проставим
             has_official_site = False
             for v in (bits or {}).values():
                 try:
@@ -756,8 +762,8 @@ def verify_twitter_and_enrich(
                 except Exception:
                     pass
 
-            if has_official_site and not bits.get("websiteURL") and site_domain_norm:
-                bits["websiteURL"] = f"https://www.{site_domain_norm}/"
+            if has_official_site and not bits.get("website") and site_domain_norm:
+                bits["website"] = f"https://www.{site_domain_norm}/"
 
             return True, bits, agg_norm
 
@@ -825,21 +831,28 @@ def select_verified_twitter(
     avatar_verified = ""
 
     # кандидаты с главной
-    browser_twitter_ordered: list[str] = []
-    if isinstance(socials, dict) and isinstance(socials.get("twitterAll"), list):
-        browser_twitter_ordered = [
-            u for u in socials["twitterAll"] if isinstance(u, str) and u
-        ]
+    candidates: list[str] = []
 
-    candidates: list[str] = list(browser_twitter_ordered)
-
-    # если twitterAll нет, но есть одиночный twitterURL - он тоже кандидат
     if (
-        not candidates
-        and isinstance(found_socials, dict)
-        and found_socials.get("twitterURL")
+        isinstance(socials, dict)
+        and isinstance(socials.get("twitter"), str)
+        and socials["twitter"]
     ):
-        candidates = [found_socials["twitterURL"]]
+        candidates.append(socials["twitter"])
+
+    if (
+        isinstance(found_socials, dict)
+        and isinstance(found_socials.get("twitter"), str)
+        and found_socials["twitter"]
+    ):
+        candidates.append(found_socials["twitter"])
+
+    # добираем возможные кандидаты напрямую из HTML главной
+    try:
+        html_candidates = extract_twitter_profiles(html or "", url or "")
+        candidates.extend(html_candidates or [])
+    except Exception:
+        pass
 
     # если вообще нет кандидатов, сразу выходим
     if not candidates:
@@ -906,7 +919,7 @@ def select_verified_twitter(
                 return twitter_final, enriched_from_agg, aggregator_url, avatar_verified
 
     logger.info(
-        "X: кандидаты с сайта=%d, ни один не подтвержден - twitterURL пуст",
+        "X: кандидаты с сайта=%d, ни один не подтвержден - twitter пуст",
         len(deduped),
     )
     return "", {}, "", ""

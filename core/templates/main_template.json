@@ -1,20 +1,29 @@
 {
   "name": "",
   "socialLinks": {
-    "websiteURL": "",
-    "twitterURL": "",
-    "discordURL": "",
-    "githubURL": "",
-    "mediumURL": "",
-    "youtubeURL": "",
-    "telegramURL": "",
-    "documentURL": "",
-    "linkedinURL": "",
-    "redditURL": ""
+    "website": "",
+    "document": "",
+    "twitter": "",
+    "discord": "",
+    "github": "",
+    "medium": "",
+    "youtube": "",
+    "telegram": "",
+    "linkedin": "",
+    "reddit": "",
+    "twitter_all": []
   },
   "contacts": {
-    "contactEmail": "",
-    "contactFormURL": "",
-    "persons": []
+    "support": {
+      "email": [],
+      "phone": [],
+      "twitter": [],
+      "telegram": [],
+      "discord": [],
+      "linkedin": [],
+      "website": [],
+      "forms": []
+    },
+    "people": []
   }
 }

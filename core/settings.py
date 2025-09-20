@@ -55,9 +55,11 @@ def get_social_keys() -> list[str]:
     out: List[str] = []
     seen = set()
     for k in raw:
-        if isinstance(k, str) and k and k not in seen:
-            out.append(k)
-            seen.add(k)
+        if isinstance(k, str):
+            kk = k.strip()
+            if kk and kk not in seen:
+                out.append(kk)
+                seen.add(kk)
     return out
 
 

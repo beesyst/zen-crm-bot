@@ -1,25 +1,32 @@
 {
   "name": "Stader Labs",
   "socialLinks": {
-    "websiteURL": "https://www.staderlabs.com",
-    "twitterURL": "https://x.com/staderlabs",
-    "discordURL": "https://discord.com/invite/xJURAhSmav",
-    "githubURL": "https://github.com/stader-labs",
-    "mediumURL": "",
-    "youtubeURL": "",
-    "telegramURL": "https://t.me/staderlabs",
-    "documentURL": "https://www.staderlabs.com/docs",
-    "linkedinURL": "",
-    "redditURL": "https://www.reddit.com/r/StaderLabs_Official"
+    "website": "https://www.staderlabs.com",
+    "document": "https://www.staderlabs.com/docs",
+    "twitter": "https://x.com/staderlabs",
+    "discord": "https://discord.com/invite/xJURAhSmav",
+    "github": "https://github.com/stader-labs",
+    "medium": "",
+    "youtube": "",
+    "telegram": "https://t.me/staderlabs",
+    "linkedin": "",
+    "reddit": "https://www.reddit.com/r/StaderLabs_Official",
+    "twitter_all": ""
   },
   "contacts": {
-    "contactEmail": "",
-    "contactFormURL": "",
-    "persons": [],
-    "emails": [
-      "admin@staderlabs.com"
-    ],
-    "forms": []
+    "support": {
+      "email": [
+        "admin@staderlabs.com"
+      ],
+      "phone": [],
+      "twitter": [],
+      "telegram": [],
+      "discord": [],
+      "linkedin": [],
+      "website": [],
+      "forms": []
+    },
+    "people": []
   },
   "svgLogo": "staderlabs.jpg"
 }

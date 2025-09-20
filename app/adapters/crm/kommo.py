@@ -16,14 +16,13 @@ def _conf():
     k = cfg["crm"]["kommo"]
     base = str(k["base_url"]).rstrip("/")
     token = str(k["access_token"])
-    secret = str(
-        k.get("secret_key", "")
-    )  # опционально — пригодится для подписи вебхуков
+    secret = str(k.get("secret_key", ""))
     stages_path = Path(k.get("stages_map", "config/stages.map.json"))
-    fields = k.get("fields", {}) or {}
+    fields_main = (k.get("fields", {}) or {}).get("main", {}) or {}
+    fields_contact = (k.get("fields", {}) or {}).get("contact", {}) or {}
     if not base or not token:
         raise RuntimeError("config: crm.kommo.base_url / access_token are required")
-    return base, token, secret, stages_path, fields
+    return base, token, secret, stages_path, fields_main, fields_contact
 
 
 def _load_stage(stages_path: Path, code: str) -> Dict[str, int]:
@@ -42,7 +41,14 @@ def _load_stage(stages_path: Path, code: str) -> Dict[str, int]:
 # Тонкий клиент Kommo v4: только HTTP-вызовы и формирование payload
 class KommoAdapter:
     def __init__(self) -> None:
-        self.base, self.token, self.secret, self.stages_path, self.fields = _conf()
+        (
+            self.base,
+            self.token,
+            self.secret,
+            self.stages_path,
+            self.fields_main,
+            self.fields_contact,
+        ) = _conf()
         self.headers = {
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
@@ -111,10 +117,8 @@ class KommoAdapter:
         # пишем сайт
         web_fid = None
         try:
-            if self.fields.get("web"):
-                web_fid = int(self.fields["web"])
-            elif self.fields.get("site"):
-                web_fid = int(self.fields["site"])
+            if self.fields_main.get("website"):
+                web_fid = int(self.fields_main["website"])
         except Exception:
             web_fid = None
 
@@ -203,13 +207,11 @@ class KommoAdapter:
         fields = (
             company.get("custom_fields_values") or company.get("custom_fields") or []
         )
-        # приоритет - явные поля web/site из настроек
+        # приоритет — явное поле fields.main.website из настроек
         web_fids = []
         try:
-            if self.fields.get("web"):
-                web_fids.append(int(self.fields["web"]))
-            if self.fields.get("site"):
-                web_fids.append(int(self.fields["site"]))
+            if self.fields_main.get("website"):
+                web_fids.append(int(self.fields_main["website"]))
         except Exception:
             pass
 
@@ -226,7 +228,7 @@ class KommoAdapter:
         for f in fields:
             code = (f.get("code") or "").lower()
             name = (f.get("name") or "").lower()
-            if code in ("website", "web", "url") or "site" in name or "web" in name:
+            if code in ("website", "url") or "website" in name or "url" in name:
                 for v in f.get("values") or []:
                     val = (v.get("value") or "").strip()
                     if val.startswith("http"):

@@ -44,10 +44,26 @@ def _load_template() -> Dict[str, Any]:
     try:
         return json.loads(MAIN_TEMPLATE.read_text(encoding="utf-8"))
     except Exception:
-        return {"socialLinks": {}}
+        return {
+            "name": "",
+            "socialLinks": {},
+            "contacts": {
+                "support": {
+                    "email": [],
+                    "phone": [],
+                    "twitter": [],
+                    "telegram": [],
+                    "discord": [],
+                    "linkedin": [],
+                    "website": [],
+                    "forms": [],
+                },
+                "people": [],
+            },
+        }
 
 
-# Считывание текузих кастом полей компании Kommo (field_id -> value)
+# Считывание текущих кастом полей компании Kommo (field_id -> value)
 def _current_cf(company: Dict[str, Any]) -> Dict[int, str]:
     out: Dict[int, str] = {}
     for f in company.get("custom_fields_values") or company.get("custom_fields") or []:
@@ -78,7 +94,9 @@ def _should_write(
 def _plan_updates(
     socials: Dict[str, str], settings: Dict[str, Any], company: Dict[str, Any]
 ) -> Dict[int, str]:
-    fields_cfg = (settings.get("crm") or {}).get("kommo", {}).get("fields", {}) or {}
+    fields_main = (settings.get("crm") or {}).get("kommo", {}).get("fields", {}).get(
+        "main", {}
+    ) or {}
     no_overwrite = (
         (settings.get("crm") or {})
         .get("kommo", {})
@@ -86,27 +104,28 @@ def _plan_updates(
         .get("no_overwrite", True)
     )
 
-    tw = socials.get("twitterURL") or ""
+    tw = socials.get("twitter") or ""
     if tw:
         tw = force_https(tw.replace("twitter.com", "x.com"))
 
+    # ключи "соцсеть → поле Kommo" (только короткие)
     want = {
-        "web": socials.get("websiteURL") or "",
-        "docs": socials.get("documentURL") or "",
-        "x": tw,
-        "discord": socials.get("discordURL") or "",
-        "github": socials.get("githubURL") or "",
-        "linkedin": socials.get("linkedinURL") or "",
-        "telegram": socials.get("telegramURL") or "",
-        "reddit": socials.get("redditURL") or "",
-        "youtube": socials.get("youtubeURL") or "",
-        "medium": socials.get("mediumURL") or "",
+        "website": socials.get("website") or "",
+        "docs": socials.get("document") or "",
+        "twitter": tw,
+        "discord": socials.get("discord") or "",
+        "github": socials.get("github") or "",
+        "linkedin": socials.get("linkedin") or "",
+        "telegram": socials.get("telegram") or "",
+        "reddit": socials.get("reddit") or "",
+        "youtube": socials.get("youtube") or "",
+        "medium": socials.get("medium") or "",
     }
 
     current = _current_cf(company)
     updates: Dict[int, str] = {}
     for key, value in want.items():
-        fid = fields_cfg.get(key)
+        fid = fields_main.get(key)
         if not fid:
             continue
         try:
@@ -139,21 +158,49 @@ def enrich_company_by_url(
     prev = _read_json(main_path) if main_path.exists() else {}
     if prev.get("contacts"):
         data.setdefault("contacts", {})
-        for key in ("emails", "forms", "persons"):
-            if not data["contacts"].get(key):
-                data["contacts"][key] = prev["contacts"].get(key, [])
+        # support
+        data["contacts"].setdefault(
+            "support",
+            {
+                "email": [],
+                "phone": [],
+                "twitter": [],
+                "telegram": [],
+                "discord": [],
+                "linkedin": [],
+                "website": [],
+                "forms": [],
+            },
+        )
+        prev_support = prev["contacts"].get("support") or {}
+        for k in (
+            "email",
+            "phone",
+            "twitter",
+            "telegram",
+            "discord",
+            "linkedin",
+            "website",
+            "forms",
+        ):
+            if not data["contacts"]["support"].get(k):
+                data["contacts"]["support"][k] = prev_support.get(k, []) or []
+        # people
+        if not data["contacts"].get("people"):
+            data["contacts"]["people"] = prev["contacts"].get("people", []) or []
+
     json_changed = _is_changed(prev, data)
     if json_changed or not main_path.exists():
         _write_json(main_path, data)
         _log.info("main.json сохранен: %s", str(main_path))
 
     socials_raw = (data or {}).get("socialLinks") or {}
-    socials = normalize_socials(socials_raw)
+    socials = normalize_socials(socials_raw)  # уже на коротких ключах
 
-    # приводим twitter → x
-    tw = socials.get("twitterURL") or ""
+    # приводим twitter → x (только короткий ключ)
+    tw = socials.get("twitter") or ""
     if tw:
-        socials["twitterURL"] = force_https(tw.replace("twitter.com", "x.com"))
+        socials["twitter"] = force_https(tw.replace("twitter.com", "x.com"))
 
     updates = _plan_updates(socials, settings, company)
 

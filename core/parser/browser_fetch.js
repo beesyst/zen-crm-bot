@@ -177,7 +177,7 @@ async function browserFetch(opts) {
           { waitUntil: waitUntil || 'domcontentloaded', timeout },
           { waitUntil: 'load',                           timeout },
           { waitUntil: 'commit',                         timeout },
-          { waitUntil: 'networkidle',                    timeout }, // добавили явную попытку
+          { waitUntil: 'networkidle',                    timeout }, // явная попытка
         ];
         for (const opt of tries) {
           try {
@@ -250,14 +250,15 @@ async function browserFetch(opts) {
       const socials = await page.evaluate((base) => {
         const rxTwitter = /twitter\.com|x\.com/i;
         const patterns = {
-          twitterURL: rxTwitter,
-          discordURL: /discord\.gg|discord\.com/i,
-          telegramURL: /t\.me|telegram\.me/i,
-          youtubeURL: /youtube\.com|youtu\.be/i,
-          linkedinURL: /linkedin\.com|lnkd\.in/i,
-          redditURL: /reddit\.com/i,
-          mediumURL: /medium\.com/i,
-          githubURL: /github\.com/i,
+          twitter: rxTwitter,
+          discord: /discord\.gg|discord\.com/i,
+          telegram: /t\.me|telegram\.me/i,
+          youtube: /youtube\.com|youtu\.be/i,
+          linkedin: /linkedin\.com|lnkd\.in/i,
+          reddit: /reddit\.com/i,
+          medium: /medium\.com/i,
+          github: /github\.com/i,
+          // document — специально не детектим по домену здесь; извлечём позже на бэке
         };
 
         const toAbs = (href) => {
@@ -319,20 +320,20 @@ async function browserFetch(opts) {
             try {
               c = toAbs(unwrapRedirect(String(c)));
               // если это discord/x - берем его вместо внутреннего /discord
-              if (!patterns.discordURL.test(href) && patterns.discordURL.test(c)) href = c;
+              if (!patterns.discord.test(href) && patterns.discord.test(c)) href = c;
               if (!rxTwitter.test(href) && rxTwitter.test(c)) href = c;
             } catch {}
           }
 
           // внутренняя «заглушка» /discord → отдаем как есть (дальше python разрулит редирект)
-          if (!patterns.discordURL.test(href) && /(^|\b)discord\b/i.test(raw)) {
+          if (!patterns.discord.test(href) && /(^|\b)discord\b/i.test(raw)) {
             href = toAbs(raw);
           }
 
           // если по домену Discord не распознан, но текст/aria/title содержат "discord" - считаем это discord-кнопкой
-          if (!acc.discordURL && !patterns.discordURL.test(href) &&
+          if (!acc.discord && !patterns.discord.test(href) &&
               (text.includes('discord') || aria.includes('discord') || title.includes('discord'))) {
-            acc.discordURL = href; // пусть Python потом развернёт до discord.com/invite/...
+            acc.discord = href; // пусть Python потом развернёт до discord.com/invite/...
           }
 
           // обычная доменная проверка
@@ -358,30 +359,30 @@ async function browserFetch(opts) {
               for (let href of arr) {
                 if (typeof href !== 'string') continue;
                 href = toAbs(unwrapRedirect(href));
-                if (!acc.twitterURL && /twitter\.com|x\.com/i.test(href)) acc.twitterURL = href;
-                else if (!acc.discordURL && /discord\.(gg|com)/i.test(href)) acc.discordURL = href;
-                else if (!acc.telegramURL && /(t\.me|telegram\.me)/i.test(href)) acc.telegramURL = href;
-                else if (!acc.youtubeURL && /(youtube\.com|youtu\.be)/i.test(href)) acc.youtubeURL = href;
-                else if (!acc.linkedinURL && /(linkedin\.com|lnkd\.in)/i.test(href)) acc.linkedinURL = href;
-                else if (!acc.redditURL && /reddit\.com/i.test(href)) acc.redditURL = href;
-                else if (!acc.mediumURL && /medium\.com/i.test(href)) acc.mediumURL = href;
-                else if (!acc.githubURL && /github\.com/i.test(href)) acc.githubURL = href;
+                if (!acc.twitter && /twitter\.com|x\.com/i.test(href)) acc.twitter = href;
+                else if (!acc.discord && /discord\.(gg|com)/i.test(href)) acc.discord = href;
+                else if (!acc.telegram && /(t\.me|telegram\.me)/i.test(href)) acc.telegram = href;
+                else if (!acc.youtube && /(youtube\.com|youtu\.be)/i.test(href)) acc.youtube = href;
+                else if (!acc.linkedin && /(linkedin\.com|lnkd\.in)/i.test(href)) acc.linkedin = href;
+                else if (!acc.reddit && /reddit\.com/i.test(href)) acc.reddit = href;
+                else if (!acc.medium && /medium\.com/i.test(href)) acc.medium = href;
+                else if (!acc.github && /github\.com/i.test(href)) acc.github = href;
                 if (/twitter\.com|x\.com/i.test(href)) twitterAll.add(href);
               }
             }
           }
         } catch {}
 
-        return { ...acc, twitterAll: Array.from(twitterAll) };
+        return { ...acc, twitter_all: Array.from(twitterAll) };
       }, url);
 
       // нормализация twitter → x.com
-      if (socials.twitterURL) socials.twitterURL = normalizeTwitter(socials.twitterURL || '');
-      if (Array.isArray(socials.twitterAll)) {
-        const filt = socials.twitterAll
+      if (socials.twitter) socials.twitter = normalizeTwitter(socials.twitter || '');
+      if (Array.isArray(socials.twitter_all)) {
+        const filt = socials.twitter_all
           .map(u => normalizeTwitter(u || ''))
           .filter(u => /^https?:\/\/(?:www\.)?(?:x\.com|twitter\.com)\/[A-Za-z0-9_]{1,15}\/?$/.test(u));
-        socials.twitterAll = Array.from(new Set(filt));
+        socials.twitter_all = Array.from(new Set(filt));
       }
 
       // для обратной совместимости возвращаем еще и html/text (если запрошено)
@@ -427,7 +428,8 @@ async function browserFetch(opts) {
         html: bodyHtml, text: bodyText,
         headers: headersObj, cookies: cookiesOut,
         console: consoleLogs, timing, antiBot,
-        websiteURL: url, ...socials,
+        website: url,
+        ...socials,
       };
 } finally {
   try { await page?.close(); } catch {}
@@ -460,7 +462,7 @@ async function browserFetch(opts) {
     console: consoleLogs,
     timing: { error: String(lastError && (lastError.message || lastError)) },
     antiBot: { detected: false, kind: '', server: '' },
-    websiteURL: url,
+    website: url,
   };
 }
 

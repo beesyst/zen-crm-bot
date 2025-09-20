@@ -55,13 +55,12 @@ def _is_social_host(h: str) -> bool:
 def _normalize_socials_dict(d: dict) -> dict:
     out = {}
     for k, v in (d or {}).items():
-        if isinstance(v, str) and v:
-            vv = normalize_url(v)
-            if k == "twitterURL":
-                vv = twitter_to_x(vv)
-            out[k] = vv
-        else:
-            out[k] = v
+        if not isinstance(v, str) or not v:
+            continue
+        vv = normalize_url(v)
+        if k == "twitter":
+            vv = twitter_to_x(vv)
+        out[k] = vv
     return out
 
 
@@ -83,10 +82,9 @@ def _fetch_html(url: str, timeout: int = 20) -> str:
     return html
 
 
-# Словарь соц-ссылок + websiteURL
+# Словарь соц-ссылок + website
 def extract_socials_from_aggregator(agg_url: str) -> dict:
-    # базовые ключи из settings.yml (socials.keys) + гарантируем наличие websiteURL
-    keys = list(dict.fromkeys([*get_social_keys(), "websiteURL"]))
+    keys = list(dict.fromkeys([*get_social_keys(), "website"]))
     out = {k: "" for k in keys}
 
     html = _fetch_html(agg_url)
@@ -131,40 +129,40 @@ def extract_socials_from_aggregator(agg_url: str) -> dict:
             or h.endswith(".x.com")
             or h.endswith(".twitter.com")
         ):
-            if "twitterURL" in out and not out["twitterURL"]:
-                out["twitterURL"] = twitter_to_x(u)
+            if "twitter" in out and not out["twitter"]:
+                out["twitter"] = twitter_to_x(u)
             return
         if h in ("t.me", "telegram.me"):
-            if "telegramURL" in out and not out["telegramURL"]:
-                out["telegramURL"] = u
+            if "telegram" in out and not out["telegram"]:
+                out["telegram"] = u
             return
         if (
             h in ("discord.gg", "discord.com")
             or h.endswith(".discord.gg")
             or h.endswith(".discord.com")
         ):
-            if "discordURL" in out and not out["discordURL"]:
-                out["discordURL"] = u
+            if "discord" in out and not out["discord"]:
+                out["discord"] = u
             return
         if h in ("youtube.com", "youtu.be") or h.endswith(".youtube.com"):
-            if "youtubeURL" in out and not out["youtubeURL"]:
-                out["youtubeURL"] = u
+            if "youtube" in out and not out["youtube"]:
+                out["youtube"] = u
             return
         if h in ("linkedin.com", "lnkd.in") or h.endswith(".linkedin.com"):
-            if "linkedinURL" in out and not out["linkedinURL"]:
-                out["linkedinURL"] = u
+            if "linkedin" in out and not out["linkedin"]:
+                out["linkedin"] = u
             return
         if h == "reddit.com" or h.endswith(".reddit.com"):
-            if "redditURL" in out and not out["redditURL"]:
-                out["redditURL"] = u
+            if "reddit" in out and not out["reddit"]:
+                out["reddit"] = u
             return
         if h == "medium.com" or h.endswith(".medium.com"):
-            if "mediumURL" in out and not out["mediumURL"]:
-                out["mediumURL"] = u
+            if "medium" in out and not out["medium"]:
+                out["medium"] = u
             return
         if h == "github.com" or h.endswith(".github.com"):
-            if "githubURL" in out and not out["githubURL"]:
-                out["githubURL"] = u
+            if "github" in out and not out["github"]:
+                out["github"] = u
             return
 
         # кандидаты на официальный сайт (не сам агрегатор и не соцхосты)
@@ -186,7 +184,7 @@ def extract_socials_from_aggregator(agg_url: str) -> dict:
         if og:
             _emit(og["content"])
 
-    # выберем лучший websiteURL
+    # выберем лучший website
     def _score(u: str) -> tuple[int, int]:
         try:
             p = urlparse(u)
@@ -213,7 +211,7 @@ def extract_socials_from_aggregator(agg_url: str) -> dict:
                 uniq.append(uu)
                 seen.add(uu)
         uniq.sort(key=_score)
-        out["websiteURL"] = uniq[0]
+        out["website"] = uniq[0]
 
     # финальная нормализация
     return _normalize_socials_dict(out)
@@ -222,7 +220,7 @@ def extract_socials_from_aggregator(agg_url: str) -> dict:
 # Контакты (email + persons) из агрегатора по конфигу roles
 def extract_contacts_from_aggregator(agg_url: str) -> dict:
     html = _fetch_html(agg_url)
-    res = {"emails": [], "persons": []}
+    res = {"emails": [], "forms": [], "persons": []}
     if not html:
         logger.info(
             "Агрегатор контакты %s: %s",
@@ -251,17 +249,20 @@ def extract_contacts_from_aggregator(agg_url: str) -> dict:
         return person
 
     # email (mailto / текст)
+    found_email = ""
     for a in soup.find_all("a", href=True):
         href = a["href"] or ""
         if href.lower().startswith("mailto:"):
             mail = href.split(":", 1)[-1].strip()
             if EMAIL_RX.fullmatch(mail):
-                res["contactEmail"] = mail
+                found_email = mail
                 break
-    if not res["contactEmail"]:
+    if not found_email:
         m = EMAIL_RX.search(soup.get_text(" ", strip=True) or "")
         if m:
-            res["contactEmail"] = m.group(0)
+            found_email = m.group(0)
+    if found_email:
+        res["emails"].append(found_email)
 
     # персональные каналы по ролям
     for a in soup.find_all("a", href=True):

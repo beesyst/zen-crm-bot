@@ -35,14 +35,79 @@ from core.paths import PROJECT_ROOT
 logger = _get_logger("collector")
 
 
-# Основная точка: сбор main.json-подобной структуры по сайту
+# Helper: нормализуем person-словарь агрегатора в новый формат contacts.people
+def _person_from_channels(src: dict) -> dict:
+    name = (src.get("name") or "").strip()
+    role = (src.get("role") or "").strip()
+    person = {
+        "name": name,
+        "position": role,
+        "emails": [src["email"]] if src.get("email") else [],
+        "phones": [],
+        "links": {
+            "linkedin": src.get("linkedin") or "",
+            "twitter": (src.get("x") or "").strip(),
+            "telegram": src.get("telegram") or "",
+            "discord": src.get("discord") or "",
+            "website": src.get("website") or "",
+        },
+        "notes": f"sourced: {src.get('source') or 'aggregator'}",
+    }
+    # очистка пустых ссылок
+    for k, v in list(person["links"].items()):
+        if not v:
+            person["links"][k] = ""
+    return person
+
+
+# Helper: ключ для дедупликации персон по основному каналу + роли
+def _person_key_for_dedup(src: dict) -> tuple[str, str]:
+    role = (src.get("role") or src.get("position") or "").strip().lower()
+    main = (
+        src.get("email")
+        or (src.get("links") or {}).get("telegram")
+        or (src.get("links") or {}).get("discord")
+        or (src.get("links") or {}).get("linkedin")
+        or (src.get("links") or {}).get("twitter")
+        or (src.get("links") or {}).get("website")
+        or src.get("telegram")
+        or src.get("discord")
+        or src.get("linkedin")
+        or src.get("x")
+        or src.get("website")
+        or ""
+    )
+    return role, (main or "").strip().lower()
+
+
+# Helper: собрать host→ключ соцсети из настроек (короткие имена ключей)
+def _build_host_key_map(get_social_hosts) -> dict:
+    key_map: dict[str, str] = {}
+    for h in get_social_hosts():
+        if h in ("x.com", "twitter.com") or "twitter" in h or h.endswith(".x.com"):
+            key_map[h] = "twitter"
+        elif "discord" in h:
+            key_map[h] = "discord"
+        elif h == "t.me" or "telegram" in h:
+            key_map[h] = "telegram"
+        elif h == "youtu.be" or "youtube" in h:
+            key_map[h] = "youtube"
+        elif h == "lnkd.in" or "linkedin" in h:
+            key_map[h] = "linkedin"
+        elif "reddit" in h:
+            key_map[h] = "reddit"
+        elif "medium" in h:
+            key_map[h] = "medium"
+        elif "github" in h:
+            key_map[h] = "github"
+    return key_map
+
+
+# Entrypoint: собираем main.json-подобную структуру по сайту (короткие ключи)
 def collect_main_data(website_url: str, main_template: dict, storage_path: str) -> dict:
-    from core.parser.link_aggregator import (
-        extract_contacts_from_aggregator,
-    )  # контакты из агрегатора
-    from core.settings import (
-        get_social_hosts,
-    )  # для построения host→key мапа динамически
+    # локальные импорты, завязанные на рантайм-конфиг
+    from core.parser.link_aggregator import extract_contacts_from_aggregator
+    from core.settings import get_social_hosts  # для динамического host→key
 
     reset_verified_state(full=False)
     _TMPL_PATH = PROJECT_ROOT / "core" / "templates" / "main_template.json"
@@ -62,49 +127,39 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
     )
     social_keys = list(dict.fromkeys([*tmpl_keys, *_CANON_KEYS]))
 
-    # инициализация блока socialLinks и обязательный websiteURL
+    # socialLinks (только короткие ключи) и обязательный website
     website_url = force_https(website_url)
     main_data["socialLinks"] = {k: "" for k in social_keys}
-    main_data["socialLinks"]["websiteURL"] = website_url
+    main_data["socialLinks"]["website"] = website_url
 
-    # остальные поля каркаса
+    # остальные поля каркаса (новая схема contacts.support / contacts.people)
     main_data.setdefault("name", "")
     main_data.setdefault("contacts", {})
-    main_data["contacts"].setdefault("emails", [])
-    main_data["contacts"].setdefault("forms", [])
-    main_data["contacts"].setdefault("persons", [])
+    main_data["contacts"].setdefault(
+        "support",
+        {
+            "email": [],
+            "phone": [],
+            "twitter": [],
+            "telegram": [],
+            "discord": [],
+            "linkedin": [],
+            "website": [],
+            "forms": [],
+        },
+    )
+    main_data["contacts"].setdefault("people", [])
 
-    # helper: маппинг host -> socialKey из конфига (без жёсткого dict)
-    def _build_host_key_map() -> dict:
-        key_map: dict[str, str] = {}
-        for h in get_social_hosts():
-            if h in ("x.com", "twitter.com") or "twitter" in h or h.endswith(".x.com"):
-                key_map[h] = "twitterURL"
-            elif "discord" in h:
-                key_map[h] = "discordURL"
-            elif h == "t.me" or "telegram" in h:
-                key_map[h] = "telegramURL"
-            elif h == "youtu.be" or "youtube" in h:
-                key_map[h] = "youtubeURL"
-            elif h == "lnkd.in" or "linkedin" in h:
-                key_map[h] = "linkedinURL"
-            elif "reddit" in h:
-                key_map[h] = "redditURL"
-            elif "medium" in h:
-                key_map[h] = "mediumURL"
-            elif "github" in h:
-                key_map[h] = "githubURL"
-        return key_map
-
-    _HOST_TO_KEY = _build_host_key_map()
+    # подготовим маппинг host→ключ
+    _HOST_TO_KEY = _build_host_key_map(get_social_hosts)
 
     try:
-        # грузим главную страницу проекта (auto: requests → при необходимости playwright)
+        # загрузка главной (auto: requests → playwright при необходимости)
         html = fetch_url_html(website_url, prefer="auto")
 
-        # первичные соцсети/доки с главной
+        # первичные соцссылки/доки с главной
         socials = extract_social_links(html, website_url, is_main_page=True)
-        socials = normalize_socials(socials)
+        socials = normalize_socials(socials)  # уже короткие ключи
 
         # перенос найденных соцсетей
         for k in social_keys:
@@ -117,26 +172,42 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
                     main_data["socialLinks"][k] = ""
                 main_data["socialLinks"][k] = v.strip()
 
+        # контакты с сайта → support.{email/forms}
         site_contacts = extract_contacts_from_site(html, website_url)
         if site_contacts.get("emails"):
-            main_data["contacts"]["emails"] = list(
-                dict.fromkeys([*main_data["contacts"]["emails"], *site_contacts["emails"]])
+            main_data["contacts"]["support"]["email"] = list(
+                dict.fromkeys(
+                    [
+                        *main_data["contacts"]["support"]["email"],
+                        *site_contacts["emails"],
+                    ]
+                )
             )
         if site_contacts.get("forms"):
-            main_data["contacts"]["forms"] = list(
-                dict.fromkeys([*main_data["contacts"]["forms"], *site_contacts["forms"]])
+            main_data["contacts"]["support"]["forms"] = list(
+                dict.fromkeys(
+                    [
+                        *main_data["contacts"]["support"]["forms"],
+                        *site_contacts["forms"],
+                    ]
+                )
             )
 
-        # Контакты: GitHub
-        gh = main_data["socialLinks"].get("githubURL") or ""
+        # контакты из GitHub (email) - source для support.email
+        gh = main_data["socialLinks"].get("github") or ""
         if gh:
             gh_contacts = extract_contacts_from_github(gh)
             if gh_contacts.get("emails"):
-                main_data["contacts"]["emails"] = list(
-                    dict.fromkeys([*main_data["contacts"]["emails"], *gh_contacts["emails"]])
+                main_data["contacts"]["support"]["email"] = list(
+                    dict.fromkeys(
+                        [
+                            *main_data["contacts"]["support"]["email"],
+                            *gh_contacts["emails"],
+                        ]
+                    )
                 )
 
-        # разбор X/Twitter: выбор верифицированного, домерж из агрегатора, аватар
+        # разбор X/Twitter: выбор верифицированного, домерж через агрегатор, аватар
         site_domain = get_domain_name(website_url)
         brand_token = site_domain.split(".")[0] if site_domain else ""
         twitter_final = ""
@@ -145,7 +216,7 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
         avatar_verified = ""
 
         try:
-            # выбираем правильный twitter из найденных кандидатов
+            # выбираем правильный twitter из кандидатов
             res = select_verified_twitter(
                 found_socials=main_data["socialLinks"],
                 socials=socials,
@@ -169,11 +240,11 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
                     twitter_final = res[0]
 
             if twitter_final:
-                main_data["socialLinks"]["twitterURL"] = twitter_final
+                main_data["socialLinks"]["twitter"] = twitter_final
 
-            # домерж соцсетей, полученных из агрегатора твиттера
+            # домерж соцсетей, полученных из агрегатора твиттера (кроме website)
             for k, v in (enriched_from_agg or {}).items():
-                if k == "websiteURL" or not v:
+                if k == "website" or not v:
                     continue
                 if k in main_data["socialLinks"] and not main_data["socialLinks"][k]:
                     main_data["socialLinks"][k] = v
@@ -182,20 +253,20 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
             logger.warning("Twitter verification error: %s", e)
 
         try:
-            # bio/аватар X + возможный линк-агрегатор в био
+            # BIO/аватар X + возможный линк-агрегатор в BIO
             bio = {}
             avatar_url = avatar_verified or ""
             need_bio_for_avatar = bool(
-                main_data["socialLinks"].get("twitterURL") and (not avatar_url)
+                main_data["socialLinks"].get("twitter") and (not avatar_url)
             )
 
-            # подтянем display name из X (без запроса аватара)
+            # display name из X (без запроса аватара)
             twitter_display = ""
-            if main_data["socialLinks"].get("twitterURL"):
+            if main_data["socialLinks"].get("twitter"):
                 try:
                     tw_profile = (
                         get_links_from_x_profile(
-                            main_data["socialLinks"]["twitterURL"], need_avatar=False
+                            main_data["socialLinks"]["twitter"], need_avatar=False
                         )
                         or {}
                     )
@@ -208,21 +279,21 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
                 try:
                     bio = (
                         get_links_from_x_profile(
-                            main_data["socialLinks"]["twitterURL"], need_avatar=True
+                            main_data["socialLinks"]["twitter"], need_avatar=True
                         )
                         or {}
                     )
                 except Exception:
                     bio = {}
 
-            # cобираем из bio все ссылки + помечаем агрегатор
+            # собрать из bio все ссылки + пометить агрегатор
             aggregator_from_bio = ""
 
             for bio_url in bio.get("links") or []:
                 host = bio_url.split("//")[-1].split("/")[0].lower().replace("www.", "")
                 if not aggregator_from_bio and is_link_aggregator(bio_url):
                     aggregator_from_bio = bio_url
-                # динамически определяем ключ соцсети по конфигу
+                # динамический подбор ключа соцсети по домену
                 key = None
                 for h, kk in _HOST_TO_KEY.items():
                     if host == h or host.endswith("." + h):
@@ -235,9 +306,9 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
                 ):
                     main_data["socialLinks"][key] = bio_url
 
-            # если агрегатор найден только в био - проверяем и мержим соцсети/контакты из него
+            # если агрегатор найден только в bio - проверяем и мержим соцсети/контакты
             if (not aggregator_url) and aggregator_from_bio:
-                tw = main_data["socialLinks"].get("twitterURL", "")
+                tw = main_data["socialLinks"].get("twitter", "")
                 m = re.match(
                     r"^https?://(?:www\.)?x\.com/([A-Za-z0-9_]{1,15})/?$",
                     (tw or "") + "/",
@@ -262,88 +333,99 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
                     except Exception:
                         pass
                     for k, v in socials_from_agg.items():
-                        if k == "websiteURL" or not v:
+                        if k == "website" or not v:
                             continue
                         if (
                             k in main_data["socialLinks"]
                             and not main_data["socialLinks"][k]
                         ):
                             main_data["socialLinks"][k] = v
-                    if verified_bits.get("websiteURL") and not main_data[
-                        "socialLinks"
-                    ].get("websiteURL"):
-                        main_data["socialLinks"]["websiteURL"] = verified_bits[
-                            "websiteURL"
-                        ]
 
-                    # контакты (email + persons)
+                    # если агрегатор дал официальный сайт — заполним, если пусто
+                    if verified_bits.get("website") and not main_data[
+                        "socialLinks"
+                    ].get("website"):
+                        main_data["socialLinks"]["website"] = verified_bits["website"]
+
+                    # контакты (emails + persons) из агрегатора → support/people
                     try:
-                        agg_contacts = extract_contacts_from_aggregator(aggregator_from_bio) or {}
+                        agg_contacts = (
+                            extract_contacts_from_aggregator(aggregator_from_bio) or {}
+                        )
                     except Exception:
                         agg_contacts = {}
 
-                    # emails
+                    # emails → support.email
                     if agg_contacts.get("emails"):
-                        main_data["contacts"]["emails"] = list(
-                            dict.fromkeys([*main_data["contacts"]["emails"], *agg_contacts["emails"]])
-                        )
-
-                    # persons
-                    existing = list(main_data["contacts"].get("persons") or [])
-                    incoming = list(agg_contacts.get("persons") or [])
-
-                    def _key(p: dict) -> tuple[str, str]:
-                        return (
-                            (p.get("role") or "").strip().lower(),
-                            (
-                                p.get("email")
-                                or p.get("telegram")
-                                or p.get("discord")
-                                or p.get("linkedin")
-                                or p.get("x")
-                                or p.get("website")
-                                or ""
+                        main_data["contacts"]["support"]["email"] = list(
+                            dict.fromkeys(
+                                [
+                                    *main_data["contacts"]["support"]["email"],
+                                    *agg_contacts["emails"],
+                                ]
                             )
-                            .strip()
-                            .lower(),
                         )
 
-                    bykey = {_key(p): p for p in existing if _key(p)}
-                    for p in incoming:
-                        k = _key(p)
-                        if not k:
-                            continue
-                        if k in bykey:
-                            # дополняем отсутствующие поля
-                            for kk, vv in p.items():
-                                if vv and not bykey[k].get(kk):
-                                    bykey[k][kk] = vv
-                        else:
-                            existing.append(p)
-                            bykey[k] = p
+                    # persons → contacts.people (конвертация в новый формат)
+                    existing_people = list(main_data["contacts"].get("people") or [])
+                    # привести уже существующее к ключам дедупликации
+                    existing_index = {
+                        _person_key_for_dedup(p): p for p in existing_people if p
+                    }
 
-                    if existing:
-                        main_data["contacts"]["persons"] = existing
+                    for p in agg_contacts.get("persons") or []:
+                        norm = _person_from_channels(p)
+                        k = _person_key_for_dedup(
+                            {
+                                "role": norm.get("position"),
+                                "links": norm.get("links"),
+                                "email": (norm.get("emails") or [None])[0],
+                            }
+                        )
+                        if k in existing_index:
+                            # дополним поля, не затирая уже заполненные
+                            dst = existing_index[k]
+                            if norm.get("name") and not dst.get("name"):
+                                dst["name"] = norm["name"]
+                            if norm.get("position") and not dst.get("position"):
+                                dst["position"] = norm["position"]
+                            # emails
+                            dst_emails = set(dst.get("emails") or [])
+                            for e in norm.get("emails") or []:
+                                if e and e not in dst_emails:
+                                    dst_emails.add(e)
+                            dst["emails"] = list(dst_emails)
+                            # links
+                            dst_links = dst.get("links") or {}
+                            for lk, lv in (norm.get("links") or {}).items():
+                                if lv and not (dst_links.get(lk) or "").strip():
+                                    dst_links[lk] = lv
+                            dst["links"] = dst_links
+                        else:
+                            existing_people.append(norm)
+                            existing_index[k] = norm
+
+                    main_data["contacts"]["people"] = existing_people
 
             # аватар из X → сохраняем в storage/<project>.jpg
             real_avatar = avatar_verified or (
                 bio.get("avatar") if isinstance(bio, dict) else ""
             )
-            if real_avatar and main_data["socialLinks"].get("twitterURL"):
+            if real_avatar and main_data["socialLinks"].get("twitter"):
                 project_slug = (
                     (brand_from_url(website_url) or "project").replace(" ", "").lower()
                 )
                 logo_filename = f"{project_slug}.jpg"
                 saved = download_twitter_avatar(
                     avatar_url=real_avatar,
-                    twitter_url=main_data["socialLinks"]["twitterURL"],
+                    twitter_url=main_data["socialLinks"]["twitter"],
                     storage_dir=storage_path,
                     filename=logo_filename,
                 )
                 if saved:
                     main_data["svgLogo"] = logo_filename
 
-            # имя проекта: берем с сайта; если пусто - пробуем display name из X
+            # имя проекта: сайт → если пусто, возьмем display name из X
             try:
                 parsed_name = extract_project_name(
                     html, website_url, twitter_display_name=twitter_display
@@ -357,7 +439,7 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
             logger.warning("Twitter BIO/avatar block failed: %s", e)
 
         # youtube: embed, handle, title (если есть)
-        yt = main_data["socialLinks"].get("youtubeURL", "")
+        yt = main_data["socialLinks"].get("youtube", "")
         if yt:
             try:
                 embed = youtube_watch_to_embed(yt)
@@ -375,22 +457,21 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
     except Exception as e:
         logger.error("collect_main_data crash: %s\n%s", e, traceback.format_exc())
 
-    # финальная нормализация + форс https
+    # финальная нормализация + форс https (все соцсети — короткие ключи)
     main_data["socialLinks"] = normalize_socials(main_data.get("socialLinks", {}))
     for k, v in list(main_data["socialLinks"].items()):
         if isinstance(v, str) and v:
             main_data["socialLinks"][k] = force_https(v)
 
-    # Хард-чек: twitterURL строго https://x.com/<handle>
-    tw = main_data["socialLinks"].get("twitterURL", "")
+    # Хард-чек: twitter строго https://x.com/<handle>
+    tw = main_data["socialLinks"].get("twitter", "")
     if isinstance(tw, str) and tw:
-        tw_canon = twitter_to_x(tw)
-        main_data["socialLinks"]["twitterURL"] = tw_canon
+        main_data["socialLinks"]["twitter"] = twitter_to_x(tw)
 
-    tw = main_data["socialLinks"].get("twitterURL", "")
+    tw = main_data["socialLinks"].get("twitter", "")
     if isinstance(tw, str) and tw:
         if not re.match(r"^https?://(?:www\.)?x\.com/[A-Za-z0-9_]{1,15}$", tw, re.I):
-            main_data["socialLinks"]["twitterURL"] = ""
+            main_data["socialLinks"]["twitter"] = ""
 
     logger.info(
         "Конечный результат %s: %s",

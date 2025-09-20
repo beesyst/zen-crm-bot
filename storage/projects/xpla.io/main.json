@@ -1,23 +1,30 @@
 {
   "name": "XPLA (ⓧ.ⓧ)",
   "socialLinks": {
-    "websiteURL": "https://www.xpla.io",
-    "twitterURL": "https://x.com/XPLA_Official",
-    "discordURL": "https://discord.com/invite/hwnmw5qBzu",
-    "githubURL": "https://github.com/xpladev",
-    "mediumURL": "https://medium.com/xpla-ecosystem",
-    "youtubeURL": "",
-    "telegramURL": "https://t.me/Official_XPLA",
-    "documentURL": "",
-    "linkedinURL": "https://www.linkedin.com/company/xpla-official",
-    "redditURL": ""
+    "website": "https://www.xpla.io",
+    "document": "",
+    "twitter": "https://x.com/XPLA_Official",
+    "discord": "https://discord.com/invite/hwnmw5qBzu",
+    "github": "https://github.com/xpladev",
+    "medium": "https://medium.com/xpla-ecosystem",
+    "youtube": "",
+    "telegram": "https://t.me/Official_XPLA",
+    "linkedin": "https://www.linkedin.com/company/xpla-official",
+    "reddit": "",
+    "twitter_all": ""
   },
   "contacts": {
-    "contactEmail": "",
-    "contactFormURL": "",
-    "persons": [],
-    "emails": [],
-    "forms": []
+    "support": {
+      "email": [],
+      "phone": [],
+      "twitter": [],
+      "telegram": [],
+      "discord": [],
+      "linkedin": [],
+      "website": [],
+      "forms": []
+    },
+    "people": []
   },
   "svgLogo": "xpla.jpg"
 }
