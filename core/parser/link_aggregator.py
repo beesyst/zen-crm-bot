@@ -10,14 +10,14 @@ from core.normalize import force_https, normalize_url, twitter_to_x
 from core.settings import (
     get_contact_roles,
     get_link_collections,
-    get_social_hosts,
+    get_social_host_map,
     get_social_keys,
 )
 
 logger = get_logger("link_aggregator")
 
 
-# Хелперы
+# Хелпер: вернуть netloc без www
 def _host(u: str) -> str:
     try:
         return urlparse(u).netloc.lower().replace("www.", "")
@@ -25,6 +25,7 @@ def _host(u: str) -> str:
         return ""
 
 
+# Хелпер: получить список доменов агрегаторов из конфига (обязательно)
 def _get_domains() -> list[str]:
     domains = get_link_collections()
     if not domains:
@@ -34,6 +35,7 @@ def _get_domains() -> list[str]:
     return domains
 
 
+# Проверка: URL принадлежит одному из доменов агрегаторов (включая поддомены)
 def is_link_aggregator(url: str | None) -> bool:
     if not url:
         return False
@@ -46,13 +48,20 @@ def is_link_aggregator(url: str | None) -> bool:
     )
 
 
+# Хелпер: URL принадлежит соц-домену из host_map (включая поддомены)
 def _is_social_host(h: str) -> bool:
     h = (h or "").lower()
-    social_hosts = get_social_hosts()
-    return any(h == s or h.endswith("." + s) for s in social_hosts)
+    host_map = get_social_host_map()
+    # прямое совпадение
+    if h in host_map:
+        return True
+    # совпадение по поддомену
+    return any(h.endswith("." + base) for base in host_map.keys())
 
 
+# Хелпер: нормализовать словарь соц-ссылок
 def _normalize_socials_dict(d: dict) -> dict:
+    allowed = set(get_social_keys())
     out = {}
     for k, v in (d or {}).items():
         if not isinstance(v, str) or not v:
@@ -60,14 +69,16 @@ def _normalize_socials_dict(d: dict) -> dict:
         vv = normalize_url(v)
         if k == "twitter":
             vv = twitter_to_x(vv)
-        out[k] = vv
+        if k in allowed:
+            out[k] = vv
     return out
 
 
-# Простой кэш HTML
+# Простой in-memory кэш HTML по URL агрегатора
 _HTML_CACHE: dict[str, str] = {}
 
 
+# Загрузка HTML агрегатора с кэшем
 def _fetch_html(url: str, timeout: int = 20) -> str:
     u = force_https(url)
     if u in _HTML_CACHE:
@@ -82,8 +93,9 @@ def _fetch_html(url: str, timeout: int = 20) -> str:
     return html
 
 
-# Словарь соц-ссылок + website
+# Извлечь соц-ссылки (по ключам из конфига) и официальный сайт с агрегатора
 def extract_socials_from_aggregator(agg_url: str) -> dict:
+    # набор ключей: конфиг-ключи + обязательный website
     keys = list(dict.fromkeys([*get_social_keys(), "website"]))
     out = {k: "" for k in keys}
 
@@ -93,10 +105,11 @@ def extract_socials_from_aggregator(agg_url: str) -> dict:
 
     soup = BeautifulSoup(html, "html.parser")
     base_host = _host(agg_url)
+    host_map = get_social_host_map()
 
     candidate_sites: list[str] = []
 
-    # выдергиваем целевой URL из типовых редиректоров агрегаторов (?url=, ?u=, ?to=, ?target=, ?redirect=, ?redirect_uri=)
+    # Хелпер: разворачиваем типовые редиректорные параметры агрегаторов
     def _unwrap_redirect(u: str) -> str:
         try:
             from urllib.parse import parse_qs, unquote, urlparse
@@ -112,64 +125,39 @@ def extract_socials_from_aggregator(agg_url: str) -> dict:
             pass
         return u
 
+    # Хелпер: реверсия host->ключ через host_map (учитывая поддомены)
+    def _host_to_key(h: str) -> str | None:
+        if h in host_map:
+            return host_map[h]
+        for base, k in host_map.items():
+            if h.endswith("." + base):
+                return k
+        return None
+
+    # Обработка одной найденной ссылки
     def _emit(href: str):
         raw = urljoin(agg_url, href)
-        # сначала разворачиваем возможный редиректор агрегатора
+        # разворачиваем возможный редиректор агрегатора
         raw = _unwrap_redirect(raw)
-        u = normalize_url(raw)  # внутри вызовется twitter_to_x()
+        u = normalize_url(raw)
         if not u:
             return
+
         h = _host(u)
         if not h:
             return
 
-        # социки по доменам
-        if (
-            h in ("x.com", "twitter.com")
-            or h.endswith(".x.com")
-            or h.endswith(".twitter.com")
-        ):
-            if "twitter" in out and not out["twitter"]:
-                out["twitter"] = twitter_to_x(u)
-            return
-        if h in ("t.me", "telegram.me"):
-            if "telegram" in out and not out["telegram"]:
-                out["telegram"] = u
-            return
-        if (
-            h in ("discord.gg", "discord.com")
-            or h.endswith(".discord.gg")
-            or h.endswith(".discord.com")
-        ):
-            if "discord" in out and not out["discord"]:
-                out["discord"] = u
-            return
-        if h in ("youtube.com", "youtu.be") or h.endswith(".youtube.com"):
-            if "youtube" in out and not out["youtube"]:
-                out["youtube"] = u
-            return
-        if h in ("linkedin.com", "lnkd.in") or h.endswith(".linkedin.com"):
-            if "linkedin" in out and not out["linkedin"]:
-                out["linkedin"] = u
-            return
-        if h == "reddit.com" or h.endswith(".reddit.com"):
-            if "reddit" in out and not out["reddit"]:
-                out["reddit"] = u
-            return
-        if h == "medium.com" or h.endswith(".medium.com"):
-            if "medium" in out and not out["medium"]:
-                out["medium"] = u
-            return
-        if h == "github.com" or h.endswith(".github.com"):
-            if "github" in out and not out["github"]:
-                out["github"] = u
+        # попадает в известные соц-домен(ы) → пишем в соответствующий конфиг-ключ
+        social_key = _host_to_key(h)
+        if social_key and social_key in out and not out[social_key]:
+            out[social_key] = twitter_to_x(u) if social_key == "twitter" else u
             return
 
-        # кандидаты на официальный сайт (не сам агрегатор и не соцхосты)
+        # кандидаты на официальный сайт (не сам агрегатор и не соц-хосты)
         if re.match(r"^https?://", u) and (not _is_social_host(h)) and (h != base_host):
             candidate_sites.append(u)
 
-    # ссылки из <a>
+    # парсим <a>
     logger.debug("Aggregator parse start: %s", agg_url)
     for a in soup.find_all("a", href=True):
         _emit(urljoin(agg_url, a["href"]))
@@ -184,7 +172,7 @@ def extract_socials_from_aggregator(agg_url: str) -> dict:
         if og:
             _emit(og["content"])
 
-    # выберем лучший website
+    # Выбираем лучший website среди кандидатов
     def _score(u: str) -> tuple[int, int]:
         try:
             p = urlparse(u)
@@ -213,11 +201,10 @@ def extract_socials_from_aggregator(agg_url: str) -> dict:
         uniq.sort(key=_score)
         out["website"] = uniq[0]
 
-    # финальная нормализация
     return _normalize_socials_dict(out)
 
 
-# Контакты (email + persons) из агрегатора по конфигу roles
+# Извлечь контакты (email, формы, люди) с агрегатора по картам ролей из конфига
 def extract_contacts_from_aggregator(agg_url: str) -> dict:
     html = _fetch_html(agg_url)
     res = {"emails": [], "forms": [], "persons": []}
@@ -231,9 +218,12 @@ def extract_contacts_from_aggregator(agg_url: str) -> dict:
 
     soup = BeautifulSoup(html, "html.parser")
     roles_map = get_contact_roles()
+    host_map = get_social_host_map()
+    allowed_keys = set(get_social_keys())
 
     EMAIL_RX = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.I)
 
+    # определяем роль по токенам из конфига
     def _resolve_role(text_or_href: str) -> str:
         s = (text_or_href or "").lower()
         for role, tokens in roles_map.items():
@@ -241,11 +231,17 @@ def extract_contacts_from_aggregator(agg_url: str) -> dict:
                 return role
         return ""
 
+    # создаем запись о человеке с нормализованными каналами
     def _mk_person(name: str, role: str, **channels):
         person = {"name": name, "role": role, "source": _host(agg_url)}
         for k, v in channels.items():
             if v:
-                person[k] = normalize_url(v)
+                url_norm = normalize_url(v)
+                if k == "twitter":
+                    url_norm = twitter_to_x(url_norm)
+                # пишем только разрешённые ключи
+                if k in allowed_keys:
+                    person[k] = url_norm
         return person
 
     # email (mailto / текст)
@@ -264,27 +260,36 @@ def extract_contacts_from_aggregator(agg_url: str) -> dict:
     if found_email:
         res["emails"].append(found_email)
 
+    # реверсия host->social key с учетом поддоменов
+    def _host_to_key(h: str) -> str | None:
+        if h in host_map:
+            return host_map[h]
+        for base, k in host_map.items():
+            if h.endswith("." + base):
+                return k
+        return None
+
     # персональные каналы по ролям
     for a in soup.find_all("a", href=True):
         text = a.get_text(" ", strip=True) or ""
         href_abs = normalize_url(urljoin(agg_url, a["href"]))
         h = _host(href_abs)
         role = _resolve_role(text) or _resolve_role(href_abs)
-
         if not role:
             continue
 
-        # подобрать имя
+        # имя по умолчанию
         name = "Support" if role == "support" else (text.strip() or role.title())
 
-        if h in ("t.me", "telegram.me"):
-            res["persons"].append(_mk_person(name, role, telegram=href_abs))
-        elif h in ("discord.gg", "discord.com"):
-            res["persons"].append(_mk_person(name, role, discord=href_abs))
-        elif h in ("x.com", "twitter.com"):
-            res["persons"].append(_mk_person(name, role, x=twitter_to_x(href_abs)))
-        elif h in ("linkedin.com", "lnkd.in"):
-            res["persons"].append(_mk_person(name, role, linkedin=href_abs))
+        # определить ключ соцсети по host_map
+        social_key = _host_to_key(h)
+
+        if social_key and social_key in allowed_keys:
+            # twitter → x.com
+            channel_url = (
+                twitter_to_x(href_abs) if social_key == "twitter" else href_abs
+            )
+            res["persons"].append(_mk_person(name, role, **{social_key: channel_url}))
         else:
             # общий сайт/форма контакта
             if href_abs.startswith("http"):
@@ -294,19 +299,18 @@ def extract_contacts_from_aggregator(agg_url: str) -> dict:
     seen = set()
     deduped = []
 
-    def _key(p):
-        return (
-            (p.get("role") or "").lower(),
-            (
-                p.get("email")
-                or p.get("telegram")
-                or p.get("discord")
-                or p.get("linkedin")
-                or p.get("x")
-                or p.get("website")
-                or ""
-            ).lower(),
-        )
+    def _key(p: dict) -> tuple[str, str]:
+        role = (p.get("role") or "").lower()
+        # приоритет основного канала: email → конфиг-ключи → website
+        main = p.get("email") or ""
+        if not main:
+            for k in get_social_keys():
+                if p.get(k):
+                    main = p.get(k)
+                    break
+        if not main:
+            main = p.get("website") or ""
+        return role, (main or "").lower()
 
     for p in res["persons"]:
         k = _key(p)
@@ -318,7 +322,7 @@ def extract_contacts_from_aggregator(agg_url: str) -> dict:
     return res
 
 
-# Find + verify
+# Найти URL агрегаторов среди списка ссылок (с нормализацией и дедупом)
 def find_aggregators_in_links(links: list[str]) -> list[str]:
     res, seen = [], set()
     for u in links or []:
@@ -332,7 +336,7 @@ def find_aggregators_in_links(links: list[str]) -> list[str]:
     return res
 
 
-# Подтверждение, что агрегатор относится к проекту
+# Подтвердить, что агрегатор относится к проекту, и вернуть соц-ссылки
 def verify_aggregator_belongs(
     agg_url: str, site_domain: str, handle: str | None
 ) -> tuple[bool, dict]:
@@ -343,6 +347,7 @@ def verify_aggregator_belongs(
 
     soup = BeautifulSoup(html, "html.parser")
 
+    # проверка наличия офсайта по домену
     has_domain = False
     if site_domain:
         for a in soup.find_all("a", href=True):
@@ -354,9 +359,9 @@ def verify_aggregator_belongs(
             except Exception:
                 continue
 
+    # проверка наличия ссылок именно на этот twitter/x-handle
     has_handle = False
     if handle:
-        # ищем именно ссылки на профиль/твиты этого хэндла
         rx = re.compile(
             r"(?:https?://)?(?:www\.)?(?:x\.com|twitter\.com)/"
             + re.escape(handle)
@@ -369,7 +374,7 @@ def verify_aggregator_belongs(
                 has_handle = True
                 break
         if not has_handle:
-            # мягкий фолбэк: по тексту (редкие био-агрегаторы)
+            # мягкий фолбэк: по тексту страницы
             if rx.search(html):
                 has_handle = True
 

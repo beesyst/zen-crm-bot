@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "playwright": "{{ node_deps.playwright | default('^1') }}",
-    "fingerprint-injector": "{{ node_deps.fingerprint_injector | default('^2') }}"
+    "fingerprint-injector": "{{ node_deps.fingerprint_injector | default('^2') }}",
+    "fingerprint-generator": "{{ node_deps.fingerprint_generator | default('^2') }}"
   }
 }

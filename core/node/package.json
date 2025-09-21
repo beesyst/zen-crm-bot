@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "playwright": "1.55.0",
-    "fingerprint-injector": "2.1.70"
+    "fingerprint-injector": "2.1.72",
+    "fingerprint-generator": "2.1.72"
   }
 }

@@ -11,14 +11,7 @@ x-app-build: &app_build
 
 services:
   api:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-      target: runtime
-      args:
-        PYTHON_VERSION: ${PYTHON_VERSION}
-        PYTHON_DEBIAN: ${PYTHON_DEBIAN}
-        NODE_VERSION: ${NODE_VERSION}
+    build: *app_build
     image: *app_image
     network_mode: host
     env_file: [../.env]
@@ -28,8 +21,9 @@ services:
       db:
         condition: service_healthy
     volumes:
-      - ../logs:/app/logs
-      - ../storage:/app/storage
+      - ../:/app
+      - node_deps:/app/core/node/node_modules
+      - ms_playwright:/ms-playwright
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
@@ -49,8 +43,9 @@ services:
       db:
         condition: service_healthy
     volumes:
-      - ../logs:/app/logs
-      - ../storage:/app/storage
+      - ../:/app
+      - node_deps:/app/core/node/node_modules
+      - ms_playwright:/ms-playwright
     restart: unless-stopped
     command: ["celery", "-A", "worker.tasks", "worker", "--loglevel=INFO"]
 
@@ -65,8 +60,9 @@ services:
       db:
         condition: service_healthy
     volumes:
-      - ../logs:/app/logs
-      - ../storage:/app/storage
+      - ../:/app
+      - node_deps:/app/core/node/node_modules
+      - ms_playwright:/ms_playwright
       - ../storage/celery:/app/storage/celery
     restart: unless-stopped
     command:
@@ -91,8 +87,9 @@ services:
       db:
         condition: service_healthy
     volumes:
-      - ../logs:/app/logs
-      - ../storage:/app/storage
+      - ../:/app
+      - node_deps:/app/core/node/node_modules
+      - ms_playwright:/ms_playwright
 
   redis:
     image: ${REDIS_IMAGE}
@@ -128,3 +125,5 @@ services:
 
 volumes:
   db_data:
+  node_deps:
+  ms_playwright:

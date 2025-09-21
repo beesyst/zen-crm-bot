@@ -1,10 +1,11 @@
 const { chromium } = require('playwright');
 const { newInjectedContext } = require('fingerprint-injector');
+const { FingerprintGenerator } = require('fingerprint-generator');
 
-// Разрешенные режимы ожидания
+// Режимы ожидания навигации
 const WAIT_STATES = new Set(['load', 'domcontentloaded', 'networkidle', 'commit', 'nowait']);
 
-// Парсинг аргументов CLI
+// CLI аргументы
 function parseArgs(argv) {
   const args = {};
   let positionalUrl = null;
@@ -28,7 +29,13 @@ function parseArgs(argv) {
       try { args.cookies = JSON.parse(argv[++i]); } catch { args.cookies = []; }
     } else if (a === '--retries') {
       args.retries = Math.max(0, Number(argv[++i]) || 0);
-    } else if (!a.startsWith('-') && !positionalUrl) {
+    }
+    // fingerprint options
+    else if (a === '--fp-device') args.fpDevice = argv[++i];           // desktop|mobile|tablet
+    else if (a === '--fp-os') args.fpOS = argv[++i];                   // windows|linux|macos|ios|android
+    else if (a === '--fp-locales') args.fpLocales = argv[++i];         // "en-US,ru-RU"
+    else if (a === '--fp-viewport') args.fpViewport = argv[++i];       // "1366x768"
+    else if (!a.startsWith('-') && !positionalUrl) {
       // Поддержка вызова: node browser_fetch.js <URL> [--raw]
       positionalUrl = a;
     }
@@ -38,8 +45,7 @@ function parseArgs(argv) {
   return args;
 }
 
-
-// Простейший детектор антибот-страниц (Cloudflare/403/503 и т.п.) - для телеметрии
+// Простейший детектор антибот-страниц (Cloudflare/403/503 и т.п.)
 async function detectAntiBot(page, response) {
   try {
     const server = response?.headers()?.server || '';
@@ -107,9 +113,108 @@ function normalizeTwitter(u) {
       }
     }
 
-    // fallback: просто twitter.com → x.com
+    // fallback: просто twitter.com → x.com (урезаем хвосты)
     return s.replace(/https?:\/\/(www\.)?twitter\.com/i, 'https://x.com').replace(/[\/?#].*$/, '');
   } catch { return u; }
+}
+
+// Построение контекста с отпечатком
+async function buildContextWithFingerprint(browser, {
+  targetUrl,
+  ua,
+  js,
+  headers,
+  fpDevice,
+  fpOS,
+  fpLocales,
+  fpViewport,
+}) {
+  // собираем ограничения для FingerprintGenerator
+  let devices = undefined;
+  if (fpDevice) {
+    const d = String(fpDevice).toLowerCase();
+    // допустимые: desktop|mobile|tablet
+    if (['desktop', 'mobile', 'tablet'].includes(d)) devices = [d];
+  }
+  let operatingSystems = undefined;
+  if (fpOS) {
+    const os = String(fpOS).toLowerCase();
+    // допустимые: windows|linux|macos|ios|android
+    if (['windows', 'linux', 'macos', 'ios', 'android'].includes(os)) operatingSystems = [os];
+  }
+  let locales = undefined;
+  if (fpLocales) {
+    const arr = String(fpLocales).split(',').map(s => s.trim()).filter(Boolean);
+    if (arr.length) locales = arr;
+  }
+
+  let viewport = undefined;
+  if (fpViewport) {
+    const m = String(fpViewport).match(/^(\d+)\s*x\s*(\d+)$/i);
+    if (m) {
+      viewport = { width: Number(m[1]), height: Number(m[2]) };
+    }
+  }
+
+  // Генерируем кастомный отпечаток, если есть хоть одно ограничение или задан UA
+  if (devices || operatingSystems || locales || viewport || ua) {
+    try {
+      const fg = new FingerprintGenerator({
+        browsers: [{ name: 'chrome' }],
+        devices: devices || ['desktop'],
+        operatingSystems: operatingSystems || ['windows', 'linux'],
+        locales: locales,
+      });
+
+      const { fingerprint } = fg.getFingerprint({ url: targetUrl });
+
+      // принудительно переопределим UA/viewport/locale, если заданы флагами
+      const finalUA = ua || fingerprint.userAgent;
+      const finalViewport = viewport || fingerprint.viewport || { width: 1366, height: 768 };
+      const finalLocale = (locales && locales[0]) || (fingerprint.languages && fingerprint.languages[0]) || 'en-US';
+
+      // создаем контекст с инжекцией данного отпечатка
+      const context = await newInjectedContext(browser, {
+        fingerprint,
+        newContextOptions: {
+          userAgent: finalUA,
+          viewport: finalViewport,
+          locale: finalLocale,
+          javaScriptEnabled: js !== false,
+          ignoreHTTPSErrors: true,
+          bypassCSP: true,
+          extraHTTPHeaders: { ...headers, 'Accept-Language': finalLocale + ',en;q=0.9' },
+        },
+      });
+      return context;
+    } catch (e) {
+      // Если что-то пошло не так — упадём в дефолтный путь ниже.
+    }
+  }
+
+  // Дефолтный путь: пусть fingerprint-injector сам генерит и инжектит отпечаток
+  try {
+    return await newInjectedContext(browser, {
+      newContextOptions: {
+        userAgent: ua || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        javaScriptEnabled: js !== false,
+        ignoreHTTPSErrors: true,
+        bypassCSP: true,
+        viewport: { width: 1366, height: 768 },
+        extraHTTPHeaders: { ...headers, 'Accept-Language': 'en-US,en;q=0.9' },
+      },
+    });
+  } catch {
+    // Фолбэк - чистый Playwright без инжекции (хуже маскируется, но работает)
+    return await browser.newContext({
+      userAgent: ua || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      javaScriptEnabled: js !== false,
+      ignoreHTTPSErrors: true,
+      bypassCSP: true,
+      viewport: { width: 1366, height: 768 },
+      extraHTTPHeaders: { ...headers, 'Accept-Language': 'en-US,en;q=0.9' },
+    });
+  }
 }
 
 // Основная функция: навигация, рендер и сбор данных
@@ -126,6 +231,10 @@ async function browserFetch(opts) {
     text = false,
     js = true,
     retries = 1,
+    fpDevice,
+    fpOS,
+    fpLocales,
+    fpViewport,
   } = opts || {};
 
   if (!url) throw new Error('url is required');
@@ -139,59 +248,56 @@ async function browserFetch(opts) {
     '--disable-blink-features=AutomationControlled',
   ];
 
-  // аккумулируем логи консоли страницы (полезно для диагностики)
   const consoleLogs = [];
 
-  // один попытка-запуск браузера и сбор данных
   const attempt = async () => {
     const startedAt = Date.now();
     const browser = await chromium.launch({ headless: true, args: launchArgs });
     let context;
     try {
-      context = await newInjectedContext(browser, {});
-    } catch {
-      context = await browser.newContext({
-        userAgent: ua || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        javaScriptEnabled: js !== false,
-        ignoreHTTPSErrors: true,
-        bypassCSP: true,
-        viewport: { width: 1366, height: 768 },
-        extraHTTPHeaders: { ...headers, 'Accept-Language': 'en-US,en;q=0.9' },
+      // контекст с инжектированным отпечатком (через fingerprint-generator при необходимости)
+      context = await buildContextWithFingerprint(browser, {
+        targetUrl: url,
+        ua,
+        js,
+        headers,
+        fpDevice,
+        fpOS,
+        fpLocales,
+        fpViewport,
       });
-    }
-    // поддержка --cookies
-    if (Array.isArray(cookies) && cookies.length) {
-      try { await context.addCookies(cookies); } catch { /* ignore */ }
-    }
 
-    let page;
-    try {
-      page = await context.newPage();
+      // куки
+      if (Array.isArray(cookies) && cookies.length) {
+        try { await context.addCookies(cookies); } catch {}
+      }
+
+      const page = await context.newPage();
       page.on('console', (msg) => {
         try { consoleLogs.push({ type: msg.type(), text: msg.text() }); } catch {}
       });
 
-      // надежная навигация: несколько вариантов waitUntil + попытка дождаться networkidle
+      // надежная навигация
       async function robustGoto(p, targetUrl) {
         const tries = [
           { waitUntil: waitUntil || 'domcontentloaded', timeout },
           { waitUntil: 'load',                           timeout },
           { waitUntil: 'commit',                         timeout },
-          { waitUntil: 'networkidle',                    timeout }, // явная попытка
+          { waitUntil: 'networkidle',                    timeout },
         ];
         for (const opt of tries) {
           try {
             const r = await p.goto(targetUrl, opt);
             try { await p.waitForLoadState('networkidle', { timeout: 12000 }); } catch {}
             return r;
-          } catch (e) { /* следующий режим */ }
+          } catch (_e) { /* следующий режим */ }
         }
         return null;
       }
 
       const resp = await robustGoto(page, url);
 
-      // затем - пауза и скролл
+      // легкий скролл для прогрева SPA
       try { await page.waitForTimeout(800); } catch {}
       try {
         await page.evaluate(async () => {
@@ -207,7 +313,7 @@ async function browserFetch(opts) {
         });
       } catch {}
 
-      // подождать зоны футера/социалок
+      // подождать футер/социалки и/или JSON-LD - часто SPA дорисовывает
       try {
         await page.waitForSelector(
           'footer a[href], [role="contentinfo"] a[href], [class*="social"] a[href]',
@@ -215,38 +321,33 @@ async function browserFetch(opts) {
         );
       } catch {}
 
-      // явно дождаться самих соц-якорей (SPA часто дорисовывает)
       try {
-          await page.waitForFunction(() => {
-            const q = (s) => document.querySelector(s);
-            const hasA =
-              q('a[href*="twitter.com"]') || q('a[href*="x.com"]') ||
-              q('a[href*="discord.gg"]') || q('a[href*="discord.com"]') ||
-              q('a[href*="t.me"]') || q('a[href*="telegram.me"]') ||
-              q('a[href*="github.com"]') || q('a[href*="medium.com"]') ||
-              q('a[href*="youtube.com"]') || q('a[href*="youtu.be"]') ||
-              q('a[href*="linkedin.com"]') || q('a[href*="lnkd.in"]') ||
-              q('a[href*="reddit.com"]');
-            const hasLd = !!document.querySelector('script[type="application/ld+json"]');
-            return hasA || hasLd;
-          }, { timeout: 7000 });
+        await page.waitForFunction(() => {
+          const q = (s) => document.querySelector(s);
+          const hasA =
+            q('a[href*="twitter.com"]') || q('a[href*="x.com"]') ||
+            q('a[href*="discord.gg"]') || q('a[href*="discord.com"]') ||
+            q('a[href*="t.me"]') || q('a[href*="telegram.me"]') ||
+            q('a[href*="github.com"]') || q('a[href*="medium.com"]') ||
+            q('a[href*="youtube.com"]') || q('a[href*="youtu.be"]') ||
+            q('a[href*="linkedin.com"]') || q('a[href*="lnkd.in"]') ||
+            q('a[href*="reddit.com"]');
+          const hasLd = !!document.querySelector('script[type="application/ld+json"]');
+          return hasA || hasLd;
+        }, { timeout: 7000 });
       } catch {}
 
-
-      // опциональный скриншот
+      // скрин по запросу
       if (screenshot) {
         try { await page.screenshot({ path: screenshot, fullPage: true }); } catch {}
       }
 
       const finalUrl = page.url();
-      // статус - телеметрия; для spa часто 0
       let status = 0;
       try { status = resp ? (typeof resp.status === 'function' ? resp.status() : 0) : 0; } catch {}
-
-      // ok - чтобы не отдавать undefined в json
       const ok = true;
 
-      // сбор соц-ссылок прямо в браузере (абсолютные URL + список всех твиттер-ссылок)
+      // извлечение соц-ссылок
       const socials = await page.evaluate((base) => {
         const rxTwitter = /twitter\.com|x\.com/i;
         const patterns = {
@@ -258,7 +359,6 @@ async function browserFetch(opts) {
           reddit: /reddit\.com/i,
           medium: /medium\.com/i,
           github: /github\.com/i,
-          // document — специально не детектим по домену здесь; извлечём позже на бэке
         };
 
         const toAbs = (href) => {
@@ -287,7 +387,6 @@ async function browserFetch(opts) {
         const acc = Object.fromEntries(Object.keys(patterns).map(k => [k, '']));
         const twitterAll = new Set();
 
-        // <a href>
         document.querySelectorAll('a[href]').forEach(a => {
           const raw = (a.getAttribute('href') || '').trim();
           if (!raw || raw === '#' || raw.startsWith('#')) return;
@@ -300,7 +399,7 @@ async function browserFetch(opts) {
 
           let href = toAbs(unwrapRedirect(raw));
 
-          // доп. извлечение из data-атрибутов и onclick
+          // кандидаты из data-* и onclick
           const candAttrs = [
             a.getAttribute('data-href'),
             a.getAttribute('data-url'),
@@ -319,24 +418,21 @@ async function browserFetch(opts) {
           for (let c of candAttrs) {
             try {
               c = toAbs(unwrapRedirect(String(c)));
-              // если это discord/x - берем его вместо внутреннего /discord
               if (!patterns.discord.test(href) && patterns.discord.test(c)) href = c;
               if (!rxTwitter.test(href) && rxTwitter.test(c)) href = c;
             } catch {}
           }
 
-          // внутренняя «заглушка» /discord → отдаем как есть (дальше python разрулит редирект)
+          // внутренняя "заглушка" /discord
           if (!patterns.discord.test(href) && /(^|\b)discord\b/i.test(raw)) {
             href = toAbs(raw);
           }
 
-          // если по домену Discord не распознан, но текст/aria/title содержат "discord" - считаем это discord-кнопкой
           if (!acc.discord && !patterns.discord.test(href) &&
               (text.includes('discord') || aria.includes('discord') || title.includes('discord'))) {
-            acc.discord = href; // пусть Python потом развернёт до discord.com/invite/...
+            acc.discord = href;
           }
 
-          // обычная доменная проверка
           for (const [key, rx] of Object.entries(patterns)) {
             if (!acc[key] && (rx.test(href) || rx.test(rel) || rx.test(aria) || rx.test(title))) {
               acc[key] = href;
@@ -344,7 +440,6 @@ async function browserFetch(opts) {
           }
           if (rxTwitter.test(href)) twitterAll.add(href);
         });
-
 
         // JSON-LD sameAs
         try {
@@ -385,11 +480,9 @@ async function browserFetch(opts) {
         socials.twitter_all = Array.from(new Set(filt));
       }
 
-      // для обратной совместимости возвращаем еще и html/text (если запрошено)
+      // HTML/TEXT опционально
       let bodyHtml = null;
       let bodyText = null;
-
-      // всегда возвращаем HTML для пост-обработки (в т.ч. когда --socials)
       if (html || opts.socials) {
         try { bodyHtml = await page.content(); } catch {}
       }
@@ -397,10 +490,8 @@ async function browserFetch(opts) {
         try { bodyText = await page.evaluate(() => document.body?.innerText || ''); } catch {}
       }
 
-      // после bodyHtml/bodyText - до return:
       const title = await page.title().catch(() => '');
 
-      // заголовки ответа
       const headersObj = {};
       if (resp) {
         try {
@@ -410,18 +501,9 @@ async function browserFetch(opts) {
         } catch {}
       }
 
-      // куки из контекста
       const cookiesOut = await context.cookies().catch(() => []);
-
-      // антибот/CF телеметрия
       const antiBot = await detectAntiBot(page, resp);
-
-      // тайминги
-      const timing = {
-        startedAt,
-        finishedAt: Date.now(),
-        ms: Date.now() - startedAt,
-      };
+      const timing = { startedAt, finishedAt: Date.now(), ms: Date.now() - startedAt };
 
       return {
         ok, status, url, finalUrl, title,
@@ -431,14 +513,14 @@ async function browserFetch(opts) {
         website: url,
         ...socials,
       };
-} finally {
-  try { await page?.close(); } catch {}
-  try { await context?.close(); } catch {}
-  try { await browser?.close(); } catch {}
-}
+    } finally {
+      // закрытие в finally, чтобы не течь даже при исключениях
+      try { await context?.browser()?.close?.(); } catch {}
+      try { await context?.close?.(); } catch {}
+    }
   };
 
-  // ретраим всю попытку при фатальном падении
+  // ретраим попытку при фатальном падении
   let lastError = null;
   for (let i = 0; i < Math.max(1, retries); i++) {
     try {
@@ -448,7 +530,8 @@ async function browserFetch(opts) {
       lastError = e;
     }
   }
-  // если все попытки упали - возвращаем структурированную ошибку
+
+  // Структурированная ошибка
   return {
     ok: false,
     status: 0,
@@ -466,7 +549,7 @@ async function browserFetch(opts) {
   };
 }
 
-// CLI-режим: прочитать аргументы, выполнить, вывести JSON
+// CLI режим
 async function main() {
   if (require.main !== module) return;
   const args = parseArgs(process.argv);
