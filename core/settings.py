@@ -14,6 +14,7 @@ from core.normalize import (
 _BASE = Path(__file__).resolve().parents[1]
 
 
+# Определяем путь к файлу настроек (можно переопределить через переменную окружения SETTINGS_PATH)
 def _settings_path() -> Path:
     env_rel = os.getenv("SETTINGS_PATH")
     return (_BASE / env_rel) if env_rel else (_BASE / "config" / "settings.yml")
@@ -28,6 +29,7 @@ def reset_settings_cache() -> None:
     _cache = None
 
 
+# Загрузка и возврат всех настроек (с кешированием)
 def get_settings() -> Dict[str, Any]:
     global _cache
     if _cache is None:
@@ -37,10 +39,12 @@ def get_settings() -> Dict[str, Any]:
     return _cache
 
 
+# Получить булевый флаг из настроек
 def get_flag(name: str, default: bool = False) -> bool:
     return bool(get_settings().get(name, default))
 
 
+# Получить путь/имя картинки из блока images
 def get_image(name: str) -> str:
     images = get_settings().get("images") or {}
     val = images.get(name)
@@ -49,32 +53,68 @@ def get_image(name: str) -> str:
     return val
 
 
-# Возврат списка ключей соц-ссылок
+# Возвращает список ключей соц-сетей (socials.keys) с проверкой
 def get_social_keys() -> list[str]:
-    raw = (get_settings().get("socials") or {}).get("keys") or []
+    raw = (get_settings().get("socials") or {}).get("keys")
+    if not isinstance(raw, list) or not raw:
+        raise RuntimeError(
+            "config/settings.yml: socials.keys обязателен и не может быть пустым"
+        )
     out: List[str] = []
     seen = set()
     for k in raw:
-        if isinstance(k, str):
-            kk = k.strip()
-            if kk and kk not in seen:
-                out.append(kk)
-                seen.add(kk)
+        if not isinstance(k, str):
+            raise RuntimeError(
+                "config/settings.yml: socials.keys должен содержать строки"
+            )
+        kk = k.strip()
+        if not kk:
+            raise RuntimeError(
+                "config/settings.yml: socials.keys содержит пустой элемент"
+            )
+        if kk not in seen:
+            out.append(kk)
+            seen.add(kk)
     return out
 
 
-# Возврат нормализованных доменов соцсетей из YAML
+# Возвращает список доменов соцсетей из старого блока socials.social_hosts (для обратной совместимости)
 def get_social_hosts() -> list[str]:
     raw = (get_settings().get("socials") or {}).get("social_hosts") or []
     return normalize_host_list(raw)
 
 
-# Возврат нормализованных доменов линк-агрегаторов из YAML
+# Возвращает маппинг host → ключ соцсети из нового блока socials.host_map
+def get_social_host_map() -> Dict[str, str]:
+    conf = get_settings().get("socials") or {}
+    host_map = conf.get("host_map")
+    if not isinstance(host_map, dict) or not host_map:
+        raise RuntimeError(
+            "config/settings.yml: socials.host_map обязателен и не может быть пустым"
+        )
+
+    out: Dict[str, str] = {}
+    for k, v in host_map.items():
+        if not isinstance(k, str) or not isinstance(v, str):
+            raise RuntimeError(
+                "config/settings.yml: socials.host_map должен быть словарём строк → строк"
+            )
+        kk = k.strip().lower().replace("www.", "")
+        vv = v.strip()
+        if not kk or not vv:
+            raise RuntimeError(
+                "config/settings.yml: socials.host_map содержит пустые ключи/значения"
+            )
+        out[kk] = vv
+    return out
+
+
+# Возвращает нормализованный список доменов линк-агрегаторов
 def get_link_collections() -> list[str]:
     return normalize_host_list(get_settings().get("link_collections") or [])
 
 
-# Возврат конфига Nitter
+# Возвращает конфиг блока parser.nitter (валидирует и нормализует)
 def get_nitter_cfg() -> dict:
     n = ((get_settings().get("parser") or {}).get("nitter")) or {}
 
@@ -101,7 +141,7 @@ def get_nitter_cfg() -> dict:
     return out
 
 
-# Словарь ролей контактов из settings.yml (contacts.roles)
+# Возвращает словарь ролей контактов (contacts.roles) с токенами
 def get_contact_roles() -> Dict[str, list[str]]:
     roles = ((get_settings().get("contacts") or {}).get("roles")) or {}
     out: Dict[str, list[str]] = {}
