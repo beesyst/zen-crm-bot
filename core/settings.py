@@ -78,12 +78,6 @@ def get_social_keys() -> list[str]:
     return out
 
 
-# Возвращает список доменов соцсетей из старого блока socials.social_hosts (для обратной совместимости)
-def get_social_hosts() -> list[str]:
-    raw = (get_settings().get("socials") or {}).get("social_hosts") or []
-    return normalize_host_list(raw)
-
-
 # Возвращает маппинг host → ключ соцсети из нового блока socials.host_map
 def get_social_host_map() -> Dict[str, str]:
     conf = get_settings().get("socials") or {}
