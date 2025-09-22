@@ -9,12 +9,14 @@ from core.log_setup import get_logger
 from core.normalize import force_https, normalize_url, twitter_to_x
 from core.settings import (
     get_contact_roles,
+    get_http_ua,
     get_link_collections,
     get_social_host_map,
     get_social_keys,
 )
 
 logger = get_logger("link_aggregator")
+UA = get_http_ua()
 
 
 # Хелпер: вернуть netloc без www
@@ -84,7 +86,7 @@ def _fetch_html(url: str, timeout: int = 20) -> str:
     if u in _HTML_CACHE:
         return _HTML_CACHE[u]
     try:
-        resp = requests.get(u, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
+        resp = requests.get(u, timeout=timeout, headers={"User-Agent": UA})
         html = resp.text or ""
     except Exception as e:
         logger.warning("Aggregator request failed: %s (%s)", u, e)

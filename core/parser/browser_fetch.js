@@ -5,7 +5,9 @@ const { FingerprintGenerator } = require('fingerprint-generator');
 // Режимы ожидания навигации
 const WAIT_STATES = new Set(['load', 'domcontentloaded', 'networkidle', 'commit', 'nowait']);
 
+// ------------------------------
 // CLI аргументы
+// ------------------------------
 function parseArgs(argv) {
   const args = {};
   let positionalUrl = null;
@@ -21,7 +23,7 @@ function parseArgs(argv) {
     else if (a === '--url') args.url = argv[++i];
     else if (a === '--wait') args.wait = argv[++i];
     else if (a === '--timeout') args.timeout = Number(argv[++i]);
-    else if (a === '--ua') args.ua = argv[++i];
+    else if (a === '--ua') args.ua = argv[++i]; // необязательный оверрайд UA
     else if (a === '--screenshot') args.screenshot = argv[++i];
     else if (a === '--headers') {
       try { args.headers = JSON.parse(argv[++i]); } catch { args.headers = {}; }
@@ -30,7 +32,7 @@ function parseArgs(argv) {
     } else if (a === '--retries') {
       args.retries = Math.max(0, Number(argv[++i]) || 0);
     }
-    // fingerprint options
+    // fingerprint options (все опционально)
     else if (a === '--fp-device') args.fpDevice = argv[++i];           // desktop|mobile|tablet
     else if (a === '--fp-os') args.fpOS = argv[++i];                   // windows|linux|macos|ios|android
     else if (a === '--fp-locales') args.fpLocales = argv[++i];         // "en-US,ru-RU"
@@ -45,7 +47,9 @@ function parseArgs(argv) {
   return args;
 }
 
-// Простейший детектор антибот-страниц (Cloudflare/403/503 и т.п.)
+// ------------------------------
+// Простая эвристика антибот-страниц
+// ------------------------------
 async function detectAntiBot(page, response) {
   try {
     const server = response?.headers()?.server || '';
@@ -73,23 +77,22 @@ async function detectAntiBot(page, response) {
   return { detected: false, kind: '', server: '' };
 }
 
+// ------------------------------
 // Нормализация twitter → x.com
+// ------------------------------
 function normalizeTwitter(u) {
   try {
     if (!u) return u;
     const s = String(u);
-    // прямой профиль
     let m = s.match(/^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([A-Za-z0-9_]{1,15})(?:[\/?#].*)?$/i);
     if (m) return `https://x.com/${m[1]}`;
 
-    // intent/follow?screen_name=
     if (/^https?:\/\/(?:www\.)?twitter\.com\/intent\/(?:follow|user)/i.test(s)) {
       const url = new URL(s);
       const screen = (url.searchParams.get('screen_name') || '').trim();
       if (/^[A-Za-z0-9_]{1,15}$/.test(screen)) return `https://x.com/${screen}`;
     }
 
-    // i/flow/login?redirect_after_login=%2F<handle>
     if (s.includes('redirect_after_login')) {
       const url = new URL(s);
       const redir = url.searchParams.get('redirect_after_login') || '';
@@ -100,7 +103,6 @@ function normalizeTwitter(u) {
       if (m3) return `https://x.com/${m3[1]}`;
     }
 
-    // generic query контейнеры
     if (s.includes('?')) {
       const url = new URL(s);
       for (const key of ['url','u','to','target','redirect','redirect_uri']) {
@@ -113,15 +115,16 @@ function normalizeTwitter(u) {
       }
     }
 
-    // fallback: просто twitter.com → x.com (урезаем хвосты)
     return s.replace(/https?:\/\/(www\.)?twitter\.com/i, 'https://x.com').replace(/[\/?#].*$/, '');
   } catch { return u; }
 }
 
-// Построение контекста с отпечатком
+// ------------------------------
+// Контекст с отпечатком
+// ------------------------------
 async function buildContextWithFingerprint(browser, {
   targetUrl,
-  ua,
+  ua,           // необязательный ручной оверрайд UA
   js,
   headers,
   fpDevice,
@@ -129,17 +132,15 @@ async function buildContextWithFingerprint(browser, {
   fpLocales,
   fpViewport,
 }) {
-  // собираем ограничения для FingerprintGenerator
+  // Ограничения для генератора отпечатка — все опционально
   let devices = undefined;
   if (fpDevice) {
     const d = String(fpDevice).toLowerCase();
-    // допустимые: desktop|mobile|tablet
     if (['desktop', 'mobile', 'tablet'].includes(d)) devices = [d];
   }
   let operatingSystems = undefined;
   if (fpOS) {
     const os = String(fpOS).toLowerCase();
-    // допустимые: windows|linux|macos|ios|android
     if (['windows', 'linux', 'macos', 'ios', 'android'].includes(os)) operatingSystems = [os];
   }
   let locales = undefined;
@@ -147,17 +148,14 @@ async function buildContextWithFingerprint(browser, {
     const arr = String(fpLocales).split(',').map(s => s.trim()).filter(Boolean);
     if (arr.length) locales = arr;
   }
-
   let viewport = undefined;
   if (fpViewport) {
     const m = String(fpViewport).match(/^(\d+)\s*x\s*(\d+)$/i);
-    if (m) {
-      viewport = { width: Number(m[1]), height: Number(m[2]) };
-    }
+    if (m) viewport = { width: Number(m[1]), height: Number(m[2]) };
   }
 
-  // Генерируем кастомный отпечаток, если есть хоть одно ограничение или задан UA
-  if (devices || operatingSystems || locales || viewport || ua) {
+  // Вариант 1: есть ограничения (device/OS/locale/viewport) или задан UA — генерим fingerprint вручную
+  if (devices || operatingSystems || locales || viewport || (ua && String(ua).trim())) {
     try {
       const fg = new FingerprintGenerator({
         browsers: [{ name: 'chrome' }],
@@ -168,62 +166,61 @@ async function buildContextWithFingerprint(browser, {
 
       const { fingerprint } = fg.getFingerprint({ url: targetUrl });
 
-      // принудительно переопределим UA/viewport/locale, если заданы флагами
-      const finalUA = ua || fingerprint.userAgent;
       const finalViewport = viewport || fingerprint.viewport || { width: 1366, height: 768 };
       const finalLocale = (locales && locales[0]) || (fingerprint.languages && fingerprint.languages[0]) || 'en-US';
 
-      // создаем контекст с инжекцией данного отпечатка
-      const context = await newInjectedContext(browser, {
-        fingerprint,
-        newContextOptions: {
-          userAgent: finalUA,
-          viewport: finalViewport,
-          locale: finalLocale,
-          javaScriptEnabled: js !== false,
-          ignoreHTTPSErrors: true,
-          bypassCSP: true,
-          extraHTTPHeaders: { ...headers, 'Accept-Language': finalLocale + ',en;q=0.9' },
-        },
-      });
-      return context;
-    } catch (e) {
-      // Если что-то пошло не так — упадём в дефолтный путь ниже.
-    }
-  }
-
-  // Дефолтный путь: пусть fingerprint-injector сам генерит и инжектит отпечаток
-  try {
-    return await newInjectedContext(browser, {
-      newContextOptions: {
-        userAgent: ua || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      const newContextOptions = {
+        // ВАЖНО: UA не задаём, если не было явного оверрайда.
+        // fingerprint-injector сам подставит UA из fingerprint.
+        ...(ua && String(ua).trim() ? { userAgent: ua } : {}),
+        viewport: finalViewport,
+        locale: finalLocale,
         javaScriptEnabled: js !== false,
         ignoreHTTPSErrors: true,
         bypassCSP: true,
-        viewport: { width: 1366, height: 768 },
-        extraHTTPHeaders: { ...headers, 'Accept-Language': 'en-US,en;q=0.9' },
-      },
-    });
-  } catch {
-    // Фолбэк - чистый Playwright без инжекции (хуже маскируется, но работает)
-    return await browser.newContext({
-      userAgent: ua || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        extraHTTPHeaders: { ...headers, 'Accept-Language': finalLocale + ',en;q=0.9' },
+      };
+
+      return await newInjectedContext(browser, { fingerprint, newContextOptions });
+    } catch (e) {
+      // Падение этой ветки не критично — ниже fallback
+    }
+  }
+
+  // Вариант 2: дефолтная инъекция — пусть injector сам сгенерит отпечаток (UA включительно)
+  try {
+    const baseOptions = {
+      ...(ua && String(ua).trim() ? { userAgent: ua } : {}), // опциональный ручной оверрайд
       javaScriptEnabled: js !== false,
       ignoreHTTPSErrors: true,
       bypassCSP: true,
       viewport: { width: 1366, height: 768 },
       extraHTTPHeaders: { ...headers, 'Accept-Language': 'en-US,en;q=0.9' },
-    });
+    };
+    return await newInjectedContext(browser, { newContextOptions: baseOptions });
+  } catch {
+    // Вариант 3: чистый Playwright — без инжекции (хуже маскируется, но работает)
+    const ctx = {
+      ...(ua && String(ua).trim() ? { userAgent: ua } : {}),
+      javaScriptEnabled: js !== false,
+      ignoreHTTPSErrors: true,
+      bypassCSP: true,
+      viewport: { width: 1366, height: 768 },
+      extraHTTPHeaders: { ...headers, 'Accept-Language': 'en-US,en;q=0.9' },
+    };
+    return await browser.newContext(ctx);
   }
 }
 
-// Основная функция: навигация, рендер и сбор данных
+// ------------------------------
+// Основная функция
+// ------------------------------
 async function browserFetch(opts) {
   const {
     url,
     wait = 'domcontentloaded',
     timeout = 30000,
-    ua,
+    ua,                 // опциональный оверрайд UA
     headers = {},
     cookies = [],
     screenshot,
@@ -255,7 +252,7 @@ async function browserFetch(opts) {
     const browser = await chromium.launch({ headless: true, args: launchArgs });
     let context;
     try {
-      // контекст с инжектированным отпечатком (через fingerprint-generator при необходимости)
+      // Контекст с инжектированным отпечатком (UA задаём только если явно передан)
       context = await buildContextWithFingerprint(browser, {
         targetUrl: url,
         ua,
@@ -267,7 +264,7 @@ async function browserFetch(opts) {
         fpViewport,
       });
 
-      // куки
+      // Куки (если нужны)
       if (Array.isArray(cookies) && cookies.length) {
         try { await context.addCookies(cookies); } catch {}
       }
@@ -277,7 +274,7 @@ async function browserFetch(opts) {
         try { consoleLogs.push({ type: msg.type(), text: msg.text() }); } catch {}
       });
 
-      // надежная навигация
+      // Надёжная навигация с несколькими попытками
       async function robustGoto(p, targetUrl) {
         const tries = [
           { waitUntil: waitUntil || 'domcontentloaded', timeout },
@@ -297,7 +294,7 @@ async function browserFetch(opts) {
 
       const resp = await robustGoto(page, url);
 
-      // легкий скролл для прогрева SPA
+      // Лёгкий прогрев SPA
       try { await page.waitForTimeout(800); } catch {}
       try {
         await page.evaluate(async () => {
@@ -313,14 +310,13 @@ async function browserFetch(opts) {
         });
       } catch {}
 
-      // подождать футер/социалки и/или JSON-LD - часто SPA дорисовывает
+      // Подождать футер/социалки/JSON-LD — частый источник ссылок
       try {
         await page.waitForSelector(
           'footer a[href], [role="contentinfo"] a[href], [class*="social"] a[href]',
           { timeout: 2500 }
         );
       } catch {}
-
       try {
         await page.waitForFunction(() => {
           const q = (s) => document.querySelector(s);
@@ -337,7 +333,7 @@ async function browserFetch(opts) {
         }, { timeout: 7000 });
       } catch {}
 
-      // скрин по запросу
+      // Скриншот по запросу
       if (screenshot) {
         try { await page.screenshot({ path: screenshot, fullPage: true }); } catch {}
       }
@@ -347,7 +343,7 @@ async function browserFetch(opts) {
       try { status = resp ? (typeof resp.status === 'function' ? resp.status() : 0) : 0; } catch {}
       const ok = true;
 
-      // извлечение соц-ссылок
+      // Извлекаем соц-ссылки
       const socials = await page.evaluate((base) => {
         const rxTwitter = /twitter\.com|x\.com/i;
         const patterns = {
@@ -399,7 +395,6 @@ async function browserFetch(opts) {
 
           let href = toAbs(unwrapRedirect(raw));
 
-          // кандидаты из data-* и onclick
           const candAttrs = [
             a.getAttribute('data-href'),
             a.getAttribute('data-url'),
@@ -423,7 +418,6 @@ async function browserFetch(opts) {
             } catch {}
           }
 
-          // внутренняя "заглушка" /discord
           if (!patterns.discord.test(href) && /(^|\b)discord\b/i.test(raw)) {
             href = toAbs(raw);
           }
@@ -471,7 +465,7 @@ async function browserFetch(opts) {
         return { ...acc, twitter_all: Array.from(twitterAll) };
       }, url);
 
-      // нормализация twitter → x.com
+      // Нормализация twitter → x.com
       if (socials.twitter) socials.twitter = normalizeTwitter(socials.twitter || '');
       if (Array.isArray(socials.twitter_all)) {
         const filt = socials.twitter_all
@@ -480,7 +474,7 @@ async function browserFetch(opts) {
         socials.twitter_all = Array.from(new Set(filt));
       }
 
-      // HTML/TEXT опционально
+      // HTML/TEXT по запросу
       let bodyHtml = null;
       let bodyText = null;
       if (html || opts.socials) {
@@ -514,13 +508,13 @@ async function browserFetch(opts) {
         ...socials,
       };
     } finally {
-      // закрытие в finally, чтобы не течь даже при исключениях
+      // Всегда закрываем
       try { await context?.browser()?.close?.(); } catch {}
       try { await context?.close?.(); } catch {}
     }
   };
 
-  // ретраим попытку при фатальном падении
+  // Ретраи при фатальном падении
   let lastError = null;
   for (let i = 0; i < Math.max(1, retries); i++) {
     try {
@@ -549,10 +543,15 @@ async function browserFetch(opts) {
   };
 }
 
+// ------------------------------
 // CLI режим
+// ------------------------------
 async function main() {
   if (require.main !== module) return;
   const args = parseArgs(process.argv);
+
+  // UA НЕ обязателен — при его отсутствии fingerprint-injector поставит согласованный UA сам.
+
   try {
     const result = await browserFetch(args);
     process.stdout.write(JSON.stringify(result, null, 2));

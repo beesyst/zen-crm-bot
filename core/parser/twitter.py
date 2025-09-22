@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 from core.log_setup import get_logger
 from core.normalize import force_https
 from core.settings import (
+    get_http_ua,
     get_nitter_cfg,
     get_social_keys,
 )
@@ -24,6 +25,7 @@ from .link_aggregator import (
 )
 
 logger = get_logger("twitter")
+UA = get_http_ua()
 
 
 # Загружаем и валидируем конфиг Nitter
@@ -189,7 +191,7 @@ def _fetch_nitter_html(handle: str) -> Tuple[str, str]:
             r = requests.get(
                 u,
                 timeout=int(_NITTER["timeout_sec"]),
-                headers={"User-Agent": "Mozilla/5.0"},
+                headers={"User-Agent": UA},
                 allow_redirects=True,
             )
             html = (r.text or "").strip()
@@ -197,12 +199,11 @@ def _fetch_nitter_html(handle: str) -> Tuple[str, str]:
         except Exception:
             return "", 0
 
-    # Тяжёлая попытка: headless-запрос через browser_fetch.js (со stealth/fingerprint)
+    # хард попытка: headless-запрос через browser_fetch.js (со stealth/fingerprint)
     def _run(inst_url: str):
         try:
             u = f"{force_https(inst_url).rstrip('/')}/{handle}"
-            # --raw включает html+text; positional URL поддерживается parseArgs
-            args = ["node", script, u, "--raw"]
+            args = ["node", script, u, "--raw", "--ua", UA]
             return subprocess.run(
                 args,
                 cwd=os.path.dirname(script),
@@ -950,7 +951,7 @@ def download_twitter_avatar(
 
     raw = normalize_twitter_avatar(force_https(avatar_url))
     headers = {
-        "User-Agent": "Mozilla/5.0",
+        "User-Agent": UA,
         "Referer": twitter_url,
         "Accept": "image/avif,image/webp,image/apng,image/*;q=0.8,*/*;q=0.5",
     }

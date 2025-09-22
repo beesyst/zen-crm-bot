@@ -12,7 +12,8 @@ runtime:
 node_deps:
   engines_node: ">=24.7.0 <25"
   playwright: "1.55.0"
-  fingerprint_injector: "2.1.70"
+  fingerprint_injector: "2.1.72"
+  fingerprint_generator: "2.1.72"
 
 app:
   host: "0.0.0.0"
@@ -32,22 +33,34 @@ crm:
     stages_map: "config/stages.map.json"
 
     fields:
-      # Main
-      phone:     null
-      email:     null
-      web:       195000
-      docs:      1113191
-      address:   195002
-      x:         1113199
-      discord:   1113985
-      linkedin:  1113201
-      telegram:  1113197
-      github:    1114007
-      reddit:    1113195
-      youtube:   1113193
-      medium:    1113983
-      fund:      1113987
-      # Project
+      main:
+        phone:    null
+        email:    null
+        website:  195000
+        document: 1113191
+        address:  195002
+        twitter:  1113199
+        discord:  1113985
+        linkedin: 1113201
+        telegram: 1113197
+        github:   1114007
+        reddit:   1113195
+        youtube:  1113193
+        medium:   1113983
+        fund:     1113987
+
+      contact:
+        phone:     null
+        email:     null
+        twitter:   1110003
+        telegram:  1110007
+        discord:   1110009
+        linkedin:  1110010
+        website:   1110011
+        forms:     1110012
+        position:  1110013
+
+      # project:
       #  docs: 1113191
       #  site: 111001
       #  info: 111003
@@ -94,32 +107,32 @@ parser:
     max_instances_try: 8
 
 socials:
-  keys:                # порядок важен
-    - websiteURL
-    - documentURL
-    - twitterURL
-    - discordURL
-    - telegramURL
-    - youtubeURL
-    - linkedinURL
-    - redditURL
-    - mediumURL
-    - githubURL
-    - twitterAll       # коллекция
-  social_hosts:        # используется для фильтра websiteURL в агрегаторах
-    - x.com
-    - twitter.com
-    - discord.gg
-    - discord.com
-    - t.me
-    - telegram.me
-    - youtube.com
-    - youtu.be
-    - linkedin.com
-    - lnkd.in
-    - reddit.com
-    - medium.com
-    - github.com
+  keys:
+    - website
+    - document
+    - twitter
+    - discord
+    - telegram
+    - youtube
+    - linkedin
+    - reddit
+    - medium
+    - github
+    - twitter_all
+  host_map:
+    x.com: twitter
+    twitter.com: twitter
+    discord.gg: discord
+    discord.com: discord
+    t.me: telegram
+    telegram.me: telegram
+    youtube.com: youtube
+    youtu.be: youtube
+    linkedin.com: linkedin
+    lnkd.in: linkedin
+    reddit.com: reddit
+    medium.com: medium
+    github.com: github
 
 link_collections:
   - linktr.ee

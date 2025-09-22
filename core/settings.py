@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import random
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -154,3 +155,49 @@ def get_contact_roles() -> Dict[str, list[str]]:
         if lst:
             out[role.strip().lower()] = lst
     return out
+
+
+# Модульный счетчик для round_robin
+_UA_RR_IDX: int = -1
+
+
+# Единый User-Agent для всех HTTP/Playwright вызовов (жестко из конфига)
+def get_http_ua() -> str:
+    cfg = get_settings() or {}
+    http = (cfg.get("parser") or {}).get("http") or {}
+
+    strategy = http.get("strategy")
+    ua_conf = http.get("ua")
+
+    # строго валидируем стратегию
+    if strategy not in ("single", "round_robin", "random"):
+        raise RuntimeError(
+            "config/settings.yml: parser.http.strategy должен быть 'single' | 'round_robin' | 'random'"
+        )
+
+    # single: должна быть строка
+    if strategy == "single":
+        if not isinstance(ua_conf, str) or not ua_conf.strip():
+            raise RuntimeError(
+                "config/settings.yml: parser.http.ua (string) обязателен для strategy=single"
+            )
+        return ua_conf.strip()
+
+    # round_robin / random: должен быть непустой список строк
+    if not isinstance(ua_conf, list) or not ua_conf:
+        raise RuntimeError(
+            "config/settings.yml: parser.http.ua (list) обязателен для strategy=round_robin|random"
+        )
+    ua_list = [str(x).strip() for x in ua_conf if isinstance(x, str) and x.strip()]
+    if not ua_list:
+        raise RuntimeError(
+            "config/settings.yml: parser.http.ua (list) пуст после нормализации"
+        )
+
+    global _UA_RR_IDX
+    if strategy == "round_robin":
+        _UA_RR_IDX = (_UA_RR_IDX + 1) % len(ua_list)
+        return ua_list[_UA_RR_IDX]
+
+    # strategy == "random"
+    return random.choice(ua_list)

@@ -4,6 +4,9 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 from core.normalize import force_https
+from core.settings import get_http_ua
+
+UA = get_http_ua()
 
 
 # Преобразование обычных youtube-ссылок (watch?v=... / youtu.be/ID) в embed-URL
@@ -48,7 +51,7 @@ def youtube_oembed_title(url: str | None) -> str:
             "https://www.youtube.com/oembed",
             params={"url": url, "format": "json"},
             timeout=12,
-            headers={"User-Agent": "Mozilla/5.0"},
+            headers={"User-Agent": UA},
         )
         if r.status_code == 200:
             data = r.json()

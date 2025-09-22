@@ -6,14 +6,11 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 from core.log_setup import get_logger
+from core.settings import get_http_ua
 
 logger = get_logger("contact")
 
-# Локальный UA, чтобы не тянуть зависимость из web.py
-UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-)
+UA = get_http_ua()
 
 
 # Сбор контактов на сайте

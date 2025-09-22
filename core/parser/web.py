@@ -11,6 +11,7 @@ from bs4 import BeautifulSoup
 from core.log_setup import get_logger
 from core.normalize import clean_project_name, force_https, is_bad_name
 from core.settings import (
+    get_http_ua,
     get_settings,
     get_social_host_map,
     get_social_keys,
@@ -22,10 +23,8 @@ logger = get_logger("web")
 _FETCHED_HTML_CACHE: dict[str, str] = {}
 _DOCS_LOGGED: set[str] = set()
 
-UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-)
+UA = get_http_ua()
+
 
 # Конфигурация (динамически из settings.yml)
 _CFG = get_settings() or {}
@@ -276,6 +275,8 @@ def _browser_fetch(path_js, url, timeout=60, wait="networkidle", mode="html") ->
             str(int(timeout * 1000)),
             "--retries",
             "2",
+            "--ua",
+            UA,
         ]
         if mode == "html":
             args.append("--html")
