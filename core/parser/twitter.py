@@ -4,17 +4,16 @@ import json
 import os
 import re
 import subprocess
-from time import time as now
-from typing import Dict, List, Tuple
+from typing import Dict, List
 from urllib.parse import unquote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 from core.log_setup import get_logger
 from core.normalize import force_https
+from core.parser.nitter import parse_profile
 from core.settings import (
     get_http_ua,
-    get_nitter_cfg,
     get_social_keys,
 )
 
@@ -28,54 +27,7 @@ logger = get_logger("twitter")
 UA = get_http_ua()
 
 
-# Загружаем и валидируем конфиг Nitter
-def _load_nitter_cfg() -> dict:
-    cfg = get_nitter_cfg()
-    if not isinstance(cfg, dict):
-        raise RuntimeError("settings.yml: parser.nitter должен быть словарем")
-
-    required = [
-        "enabled",
-        "instances",
-        "retry_per_instance",
-        "timeout_sec",
-        "bad_ttl_sec",
-        "use_stealth",
-        "max_instances_try",
-    ]
-    missing = [k for k in required if k not in cfg]
-    if missing:
-        raise RuntimeError(
-            f"settings.yml: отсутствуют ключи parser.nitter: {', '.join(missing)}"
-        )
-
-    if not isinstance(cfg["instances"], list) or not cfg["instances"]:
-        raise RuntimeError(
-            "settings.yml: parser.nitter.instances должен быть непустым списком"
-        )
-
-    instances = [
-        force_https(str(x)).rstrip("/") for x in cfg["instances"] if str(x).strip()
-    ]
-    if not instances:
-        raise RuntimeError(
-            "settings.yml: parser.nitter.instances после нормализации пуст"
-        )
-
-    return {
-        "enabled": bool(cfg["enabled"]),
-        "instances": instances,
-        "retry_per_instance": int(cfg["retry_per_instance"]),
-        "timeout_sec": int(cfg["timeout_sec"]),
-        "bad_ttl_sec": int(cfg["bad_ttl_sec"]),
-        "use_stealth": bool(cfg["use_stealth"]),
-        "max_instances_try": int(cfg["max_instances_try"]),
-    }
-
-
-_NITTER = _load_nitter_cfg()
-_NITTER_HTML_CACHE: Dict[str, Tuple[str, str]] = {}
-_NITTER_BAD: Dict[str, float] = {}
+# Кэш уже распарсенных профилей X
 _PARSED_CACHE: Dict[str, Dict] = {}
 
 
@@ -158,272 +110,6 @@ def _decode_nitter_pic_url(src: str) -> str:
     return s
 
 
-# Возвращаем список живых nitter-инстансов (исключая «забаненные» на TTL)
-def _alive_instances() -> List[str]:
-    t = now()
-    alive = []
-    for inst in _NITTER["instances"]:
-        inst = force_https(inst.rstrip("/"))
-        if _NITTER_BAD.get(inst, 0) <= t:
-            alive.append(inst)
-    return alive
-
-
-# Баним nitter-инстанс на bad_ttl_sec
-def _ban(inst: str):
-    _NITTER_BAD[force_https(inst.rstrip("/"))] = now() + max(60, _NITTER["bad_ttl_sec"])
-
-
-# Забираем HTML профиля через nitter (HTTP → headless/stealth и наоборот по конфигу)
-def _fetch_nitter_html(handle: str) -> Tuple[str, str]:
-    if not handle:
-        return "", ""
-
-    def _cache_key(inst: str) -> str:
-        return f"{force_https(inst).rstrip('/')}|{handle.lower()}"
-
-    script = os.path.join(os.path.dirname(__file__), "browser_fetch.js")
-
-    # Простая попытка: обычный GET к nitter-инстансу
-    def _http_try(inst_url: str) -> tuple[str, int]:
-        try:
-            u = f"{force_https(inst_url).rstrip('/')}/{handle}"
-            r = requests.get(
-                u,
-                timeout=int(_NITTER["timeout_sec"]),
-                headers={"User-Agent": UA},
-                allow_redirects=True,
-            )
-            html = (r.text or "").strip()
-            return html, r.status_code
-        except Exception:
-            return "", 0
-
-    # хард попытка: headless-запрос через browser_fetch.js (со stealth/fingerprint)
-    def _run(inst_url: str):
-        try:
-            u = f"{force_https(inst_url).rstrip('/')}/{handle}"
-            args = ["node", script, u, "--raw", "--ua", UA]
-            return subprocess.run(
-                args,
-                cwd=os.path.dirname(script),
-                capture_output=True,
-                text=True,
-                timeout=max(int(_NITTER["timeout_sec"]) + 12, 30),
-            )
-        except Exception as e:
-            logger.warning("Nitter runner failed %s: %s", inst_url, e)
-            return None
-
-    last_err = None
-
-    first_pass = (
-        ("headless", "http") if _NITTER["use_stealth"] else ("http", "headless")
-    )
-    max_try = max(1, int(_NITTER["max_instances_try"]))
-
-    for mode in first_pass:
-        tried = 0
-        # каждый круг берём актуальный список живых, чтобы исключить свежезабаненных
-        for inst in _alive_instances():
-            if tried >= max_try:
-                break
-            key = _cache_key(inst)
-            if key in _NITTER_HTML_CACHE:
-                return _NITTER_HTML_CACHE[key]
-
-            if mode == "headless":
-                head_retries = max(1, int(_NITTER["retry_per_instance"]))
-                for _ in range(head_retries):
-                    res = _run(inst)
-                    if not res:
-                        _ban(inst)
-                        last_err = "runner_failed"
-                        break
-                    try:
-                        data = (
-                            json.loads(res.stdout)
-                            if (res.stdout or "").strip().startswith("{")
-                            else {}
-                        )
-                    except Exception:
-                        data = {}
-                    html = (
-                        (data.get("html") or "").strip()
-                        if isinstance(data, dict)
-                        else ""
-                    )
-                    status = int(data.get("status", 0) or 0)
-
-                    if html and _html_matches_handle(html, handle):
-                        _NITTER_HTML_CACHE[key] = (html, force_https(inst).rstrip("/"))
-                        return html, force_https(inst).rstrip("/")
-
-                    kind = (data.get("antiBot") or {}).get("kind", "")
-                    if (
-                        kind
-                        or status in (0, 403, 429, 503)
-                        or (status == 200 and not _html_matches_handle(html, handle))
-                    ):
-                        _ban(inst)
-                    last_err = kind or f"HEADLESS HTTP {status}" or "no_html"
-
-                tried += 1
-                continue
-
-            # mode == http
-            http_retries = max(1, int(_NITTER["retry_per_instance"]))
-            ok_html, code = "", 0
-            for _ in range(http_retries):
-                ok_html, code = _http_try(inst)
-                if ok_html and _html_matches_handle(ok_html, handle):
-                    _NITTER_HTML_CACHE[key] = (ok_html, force_https(inst).rstrip("/"))
-                    return ok_html, force_https(inst).rstrip("/")
-
-            if code in (0, 403, 429, 503) or (
-                code == 200 and not _html_matches_handle(ok_html, handle)
-            ):
-                _ban(inst)
-            else:
-                logger.warning(
-                    "Nitter inst %s вернул %s без валидного HTML для @%s, не баним",
-                    inst,
-                    code,
-                    handle,
-                )
-            last_err = f"HTTP {code or 0}"
-            tried += 1
-
-    if last_err:
-        logger.warning("Nitter: all instances failed (%s)", last_err)
-        logger.warning("Nitter HTML пуст для %s", handle)
-    return "", ""
-
-
-# Извлекаем ссылку на аватар из HTML nitter
-def _pick_avatar_from_soup(soup: BeautifulSoup, inst_base: str) -> tuple[str, str]:
-    a = soup.select_one(".profile-card a.profile-card-avatar[href]")
-    if a and a.get("href"):
-        href = (a.get("href") or "").strip()
-        raw = (
-            f"{force_https(inst_base).rstrip('/')}{href}"
-            if href.startswith("/")
-            else (
-                href
-                if href.startswith("http")
-                else f"{force_https(inst_base).rstrip('/')}/{href.lstrip('/')}"
-            )
-        )
-        normalized = _decode_nitter_pic_url(href)
-        return raw, normalized
-
-    img = soup.select_one(
-        ".profile-card a.profile-card-avatar img, "
-        "a.profile-card-avatar img, "
-        ".profile-card img.avatar, "
-        "img[src*='pbs.twimg.com/profile_images/']"
-    )
-    if img and img.get("src"):
-        src = (img.get("src") or "").strip()
-        raw = (
-            f"{force_https(inst_base).rstrip('/')}{src}"
-            if src.startswith("/")
-            else (
-                src
-                if src.startswith("http")
-                else f"{force_https(inst_base).rstrip('/')}/{src.lstrip('/')}"
-            )
-        )
-        normalized = _decode_nitter_pic_url(src)
-        return raw, normalized
-
-    meta = soup.select_one("meta[property='og:image'], meta[name='og:image']")
-    if meta and meta.get("content"):
-        c = (meta["content"] or "").strip()
-        if "/pic/" in c or "%2F" in c or "%3A" in c:
-            raw = (
-                f"{force_https(inst_base).rstrip('/')}{c}"
-                if c.startswith("/")
-                else (
-                    c
-                    if c.startswith("http")
-                    else f"{force_https(inst_base).rstrip('/')}/{c.lstrip('/')}"
-                )
-            )
-            normalized = _decode_nitter_pic_url(c)
-            return raw, normalized
-        if "pbs.twimg.com" in c:
-            return force_https(c), force_https(c)
-    return "", ""
-
-
-# Парсим профиль через nitter: имя, ссылки из BIO, аватар
-def _parse_nitter_profile(twitter_url: str) -> Dict[str, object]:
-    if not _NITTER["enabled"]:
-        return {}
-
-    m = re.match(
-        r"^https?://(?:www\.)?x\.com/([A-Za-z0-9_]{1,15})/?$",
-        (twitter_url or "") + "/",
-        re.I,
-    )
-    handle = m.group(1) if m else ""
-    if not handle:
-        return {}
-
-    html, inst = _fetch_nitter_html(handle)
-    if not html or not inst:
-        logger.warning("Nitter HTML пуст для %s", handle)
-        return {}
-
-    soup = BeautifulSoup(html, "html.parser")
-    name_tag = soup.select_one(".profile-card-fullname")
-    name = (name_tag.get_text(strip=True) if name_tag else "") or ""
-
-    base = f"{(inst or '').rstrip('/')}/{handle}"
-
-    links = set()
-    seen = set()
-    areas = [
-        ".profile-card .profile-website a",
-        ".profile-card .profile-bio a",
-        ".profile-website a",
-        ".profile-bio a",
-    ]
-    for sel in areas:
-        for a in soup.select(sel):
-            href = (a.get("href") or "").strip()
-            if not href:
-                continue
-            try:
-                abs_u = urljoin(base, href)
-            except Exception:
-                abs_u = href
-            if not abs_u.startswith("http"):
-                continue
-            u = force_https(abs_u)
-            if u not in seen:
-                links.add(u)
-                seen.add(u)
-
-    # Аватар: raw для лога (инстанс/pic/...), normalized для использования
-    avatar_raw, avatar_norm = _pick_avatar_from_soup(soup, inst)
-    logger.info(
-        "Nitter GET+parse: %s/%s → avatar=%s, links=%d",
-        (inst or "-").rstrip("/"),
-        handle,
-        "yes" if avatar_raw or avatar_norm else "no",
-        len(links),
-    )
-
-    return {
-        "links": list(links),
-        "avatar": normalize_twitter_avatar(avatar_norm or ""),
-        "avatar_raw": force_https(avatar_raw or ""),
-        "name": name,
-    }
-
-
 # Запускаем playwright-скрипт как запасной вариант (прямой X)
 def _run_playwright(u: str, timeout: int = 60) -> dict:
     host = urlparse(u).netloc.lower().replace("www.", "")
@@ -444,6 +130,10 @@ def _run_playwright(u: str, timeout: int = 60) -> dict:
                 "1",
                 "--wait",
                 "domcontentloaded",
+                "--prefer",
+                "x",
+                "--ua",
+                UA or "",
             ],
             cwd=os.path.dirname(script),
             capture_output=True,
@@ -454,19 +144,10 @@ def _run_playwright(u: str, timeout: int = 60) -> dict:
         logger.warning("twitter_scraper.js run error for %s: %s", u, e)
         return {}
     try:
-        data = (
-            json.loads(res.stdout) if (res.stdout or "").strip().startsWith("{") else {}
-        )
+        raw = (res.stdout or "").strip()
+        data = json.loads(raw) if raw.startswith("{") else {}
     except Exception:
-        # Защита от AttributeError при опечатке startsWith — корректно распарсим ещё раз
-        try:
-            data = (
-                json.loads(res.stdout)
-                if (res.stdout or "").strip().startswith("{")
-                else {}
-            )
-        except Exception:
-            data = {}
+        data = {}
     return data if isinstance(data, dict) else {}
 
 
@@ -483,7 +164,7 @@ def get_links_from_x_profile(
         return cached
 
     # сначала nitter
-    parsed = _parse_nitter_profile(safe) or {}
+    parsed = parse_profile(safe) or {}
 
     # если nitter не дал вообще ничего или дал без ссылок - пробуем playwright
     if (not parsed) or not (parsed.get("links") or []):
@@ -537,42 +218,11 @@ def get_links_from_x_profile(
         "name": parsed.get("name") or "",
     }
 
-    avatar_raw = (parsed.get("avatar_raw") or "").strip()
-    if avatar_raw:
-        # если аватар пришёл из nitter — логируем сырой url вида https://<inst>/pic/...
-        logger.info("Avatar URL: %s", avatar_raw)
-    elif (out.get("avatar") or "").strip():
-        # если пришёл напрямую из x.com — логируем pbs.twimg.com-линк
-        logger.info("Avatar URL: %s", out["avatar"])
-
     _PARSED_CACHE[safe] = out
     return out
 
 
-# Проверяем, что HTML nitter действительно относится к нужному хэндлу
-def _html_matches_handle(html: str, handle: str) -> bool:
-    if not html or not handle:
-        return False
-    low = html.lower()
-    h = handle.lower()
-
-    # типичный якорь профиля в nitter: href="/<handle>"
-    if re.search(rf'href\s*=\s*["\']/\s*{re.escape(h)}(?:["\'/?# ]|$)', low):
-        return True
-    # username в карточке: @<handle>
-    if re.search(rf"@{re.escape(h)}(?:[\"\' <]|$)", low):
-        return True
-    # подстраховка: есть блоки profile-card и упоминание handle
-    if ("profile-card" in low) and (h in low):
-        return True
-    # на очень короткий html не ведёмся
-    if len(low) < 600:
-        return False
-
-    return False
-
-
-# Достаём все кандидаты X-профилей из HTML (ссылки и «голый» текст)
+# Достаем все кандидаты X-профилей из HTML (ссылки и голый текст)
 def extract_twitter_profiles(html: str, base_url: str) -> List[str]:
     soup = BeautifulSoup(html or "", "html.parser")
     profiles: set[str] = set()
@@ -606,7 +256,7 @@ def extract_twitter_profiles(html: str, base_url: str) -> List[str]:
         except Exception:
             continue
 
-    # из «голого» текста (полные url) — тоже строгая валидация
+    # из голого текста (полные url) - тоже строгая валидация
     text = html or ""
     for m in re.finditer(
         r"https?://(?:www\.)?(?:x\.com|twitter\.com)/([A-Za-z0-9_]{1,15})(?![A-Za-z0-9_/])",
@@ -623,7 +273,7 @@ def extract_twitter_profiles(html: str, base_url: str) -> List[str]:
     return list(profiles)
 
 
-# Быстро проверяем, что профиль «живой»: есть хотя бы одна ссылка в BIO
+# Быстро проверяем, что профиль живой: есть хотя бы одна ссылка в BIO
 def _is_valid_profile(parsed: dict) -> bool:
     if not isinstance(parsed, dict):
         return False
@@ -645,9 +295,8 @@ def verify_twitter_and_enrich(
     # прямой офсайт в bio → подтверждаем X
     site_domain_norm = (site_domain or "").lower().lstrip(".")
     bio_links = [force_https(b).rstrip("/") for b in (data.get("links") or [])]
-    logger.info("BIO из Nitter: %s", bio_links)
 
-    # отмечаем, что X подтверждён по офсайту
+    # отмечаем, что X подтвержден по офсайту
     confirmed_by_site = False
     for b in bio_links:
         try:
@@ -676,7 +325,7 @@ def verify_twitter_and_enrich(
             agg_used = agg_norm
             break
 
-    # если X подтверждён по сайту или по агрегатору — лог один раз и возвращаем
+    # если X подтвержден по сайту или по агрегатору - лог один раз и возвращаем
     if confirmed_by_site or enriched_bits:
         if confirmed_by_site and site_domain_norm and not enriched_bits.get("website"):
             enriched_bits["website"] = f"https://{site_domain_norm}/".replace(
@@ -698,12 +347,12 @@ def verify_twitter_and_enrich(
             # для ключа twitter приводим домен к x.com
             if k == "twitter":
                 vv = vv.replace("twitter.com", "x.com")
-            # пропускаем только разрешённые ключи
+            # пропускаем только разрешенные ключи
             if k in allowed:
                 out[k] = vv
         return out
 
-    # Проверяем каждый агрегатор: жёстко → мягко → soft-policy из BIO
+    # Проверяем каждый агрегатор: жестко → мягко → soft-policy из BIO
     for agg in aggs:
         agg_norm = force_https(agg)
 
@@ -984,7 +633,5 @@ def reset_verified_state(full: bool = False) -> None:
     if full:
         try:
             _PARSED_CACHE.clear()
-            _NITTER_HTML_CACHE.clear()
-            _NITTER_BAD.clear()
         except Exception:
             pass

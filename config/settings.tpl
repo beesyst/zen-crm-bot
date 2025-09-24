@@ -97,6 +97,7 @@ parser:
       - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
   nitter:
     enabled: true
+    strategy: "random"     # "random" или "round_robin"
     instances: [
       "https://nitter.net",
       "https://xcancel.com",
@@ -107,11 +108,9 @@ parser:
       "https://nitter.privacyredirect.com",
       "https://nitter.kuuro.net"
     ]
-    retry_per_instance: 2
-    timeout_sec: 14
-    bad_ttl_sec: 600
-    use_stealth: true
-    max_instances_try: 8
+    timeout: 10            # таймаут (в сек)
+    bad_ttl: 600           # на сколько сек баним инстанс после неудачи
+    max_ins: 3             # сколько инстансов за один прогон
 
 socials:
   keys:

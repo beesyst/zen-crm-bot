@@ -1,25 +1,9 @@
-// zen-crm-bot/core/parser/twitter_scraper.js
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Используем Playwright + fingerprint-generator + fingerprint-injector.
-// Порядок по умолчанию: Nitter → X (совместимо с твоим пайплайном).
-// ─────────────────────────────────────────────────────────────────────────────
 const { URL } = require('node:url');
 const { chromium } = require('playwright');
 const { FingerprintGenerator } = require('fingerprint-generator');
 const { FingerprintInjector } = require('fingerprint-injector');
 
-// ─────────────────────────────────────────────────────────────────────────────
 // CLI-параметры
-//   --handle <name>      — ручка профиля (если нет URL)
-//   --url <url>          — полный URL профиля
-//   --timeout <ms>       — таймаут навигации
-//   --ua <string>        — принудительный user-agent (перебивает fingerprint UA)
-//   --retries <n>        — число повторов для X
-//   --wait <state>       — load|domcontentloaded|networkidle|commit|nowait
-//   --js <true|false>    — включить/выключить JS
-//   --prefer <nitter|x>  — порядок обхода (по умолчанию nitter → x)
-// ─────────────────────────────────────────────────────────────────────────────
 function parseArgs(argv) {
   const args = {};
   for (let i = 2; i < argv.length; i++) {
@@ -36,9 +20,7 @@ function parseArgs(argv) {
   return args;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Получение @handle из url/параметра
-// ─────────────────────────────────────────────────────────────────────────────
 function toHandle(inputUrl, handle) {
   if (handle) return handle.replace(/^@/, '').trim();
   if (!inputUrl) return null;
@@ -51,9 +33,7 @@ function toHandle(inputUrl, handle) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // "1.2k / 1,2 тыс. / 1.2m ..." → число
-// ─────────────────────────────────────────────────────────────────────────────
 function humanCountToNumber(str) {
   if (!str) return null;
   const s = String(str).trim().toLowerCase().replace(/\s/g, '');
@@ -70,25 +50,19 @@ function humanCountToNumber(str) {
   return digits ? Number(digits) : null;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // twitter.com → x.com
-// ─────────────────────────────────────────────────────────────────────────────
 function normalizeTwitter(u) {
   try { return u ? u.replace(/https?:\/\/(www\.)?twitter\.com/i, 'https://x.com') : u; }
   catch { return u; }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Абсолютный URL относительно base
-// ─────────────────────────────────────────────────────────────────────────────
 function absUrl(href, base) {
   try { return href?.startsWith('http') ? href : new URL(href, base).href; }
   catch { return href; }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Декодирование nitter /pic/... → pbs.twimg.com
-// ─────────────────────────────────────────────────────────────────────────────
 function decodeNitterPic(u) {
   try {
     if (!u) return null;
@@ -103,9 +77,7 @@ function decodeNitterPic(u) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Основной скрапер: по умолчанию Nitter → X
-// ─────────────────────────────────────────────────────────────────────────────
 async function scrapeTwitterProfile({
   handle,
   url,
@@ -129,12 +101,12 @@ async function scrapeTwitterProfile({
     '--disable-blink-features=AutomationControlled',
   ];
 
-  // один «проход»: запустить хром, сгенерить fingerprint, внедрить, перейти и распарсить
+  // один проход: запустить хром, сгенерить fingerprint, внедрить, перейти и распарсить
   async function tryOne(targetUrl, isNitter = false) {
     const browser = await chromium.launch({ headless: true, args: launchArgs });
     let context, page;
     try {
-      // Генератор отпечатков — контролируем типы устройств/ОС под наш таргет
+      // генератор отпечатков - контролируем типы устройств/ОС под наш таргет
       const fg = new FingerprintGenerator({
         browsers: [{ name: 'chrome' }],
         devices: ['desktop'],
@@ -156,20 +128,20 @@ async function scrapeTwitterProfile({
         extraHTTPHeaders: { 'Accept-Language': 'en-US,en;q=0.9' },
       });
 
-      // Впрыскиваем сгенерированный отпечаток в контекст
+      // впрыскиваем сгенерированный отпечаток в контекст
       const injector = new FingerprintInjector();
       await injector.attachFingerprintToPlaywright(context, fingerprint);
 
       page = await context.newPage();
 
-      // Чуть экономим трафик/шум
+      // чуть экономим трафик/шум
       await page.route('**/*', (route) => {
         const t = route.request().resourceType();
         if (t === 'image' || t === 'media' || t === 'font') return route.abort();
         return route.continue();
       });
 
-      // Робастная навигация: несколько режимов ожидания
+      // робастная навигация: несколько режимов ожидания
       const waitOpt = (wait === 'nowait')
         ? undefined
         : (['load','domcontentloaded','networkidle','commit'].includes(wait) ? wait : 'domcontentloaded');
@@ -188,7 +160,7 @@ async function scrapeTwitterProfile({
         } catch { /* следующий режим */ }
       }
 
-      // Небольшой автоскролл — на SPA дорисовываются блоки
+      // небольшой автоскролл - на SPA дорисовываются блоки
       try {
         await page.evaluate(async () => {
           const delay = (ms) => new Promise(r => setTimeout(r, ms));
@@ -201,7 +173,7 @@ async function scrapeTwitterProfile({
 
       const finalUrl = page.url();
 
-      // Если X увёл на логин/челлендж — считаем блокировкой
+      // если X увел на логин/челлендж - считаем блокировкой
       if (!isNitter && /(log(in)?|suspend|account|consent|challenge)/i.test(finalUrl)) {
         throw new Error(`blocked/redirected to ${finalUrl}`);
       }
@@ -216,7 +188,7 @@ async function scrapeTwitterProfile({
     }
   }
 
-  // Порядок обхода: по умолчанию Nitter → X (можно --prefer x)
+  // порядок обхода: по умолчанию Nitter → X (можно --prefer x)
   let lastErr = null;
   const order = (String(prefer || '').toLowerCase() === 'x')
     ? [{ url: primaryUrl, isNitter: false }, { url: fallbackUrl, isNitter: true }]
@@ -240,7 +212,7 @@ async function scrapeTwitterProfile({
     }
   }
 
-  // Обе ветки упали
+  // обе ветки упали
   return {
     ok: false,
     handle: username,
@@ -250,9 +222,7 @@ async function scrapeTwitterProfile({
   };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Извлечение X (x.com/<handle>)
-// ─────────────────────────────────────────────────────────────────────────────
 async function extractFromX(page, handle, finalUrl) {
   const name = await page.locator('div[data-testid="UserName"] span').first().textContent().catch(() => null);
   const bio = await page.locator('div[data-testid="UserDescription"]').first().textContent().catch(() => null);
@@ -356,9 +326,7 @@ async function extractFromX(page, handle, finalUrl) {
   };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Извлечение Nitter (nitter.net/<handle>)
-// ─────────────────────────────────────────────────────────────────────────────
 async function extractFromNitter(page, handle, finalUrl) {
   const name = await page.locator('.profile-card-fullname').first().textContent().catch(() => null);
   const bio = await page.locator('div.profile-bio').first().textContent().catch(() => null);
@@ -467,9 +435,7 @@ async function extractFromNitter(page, handle, finalUrl) {
   };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CLI-обёртка
-// ─────────────────────────────────────────────────────────────────────────────
+// CLI-обертка
 async function main() {
   if (require.main !== module) return;
   const args = parseArgs(process.argv);
