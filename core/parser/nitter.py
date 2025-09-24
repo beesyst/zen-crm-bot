@@ -305,51 +305,50 @@ def _pick_avatar_from_soup(soup: BeautifulSoup, inst_base: str) -> tuple[str, st
 
 # Получение HTML профиля через Nitter: только Playwright, 1 попытка на инстанс
 def fetch_profile_html(handle: str) -> tuple[str, str]:
-    if not handle or not _ENABLED or not _INSTANCES:
+    if not handle:
         return "", ""
 
-    candidates = _sample_instances_unique(max(1, _MAX_INS))
+    # если Nitter включен и есть инстансы - пытаемся их
+    if _ENABLED and _INSTANCES:
+        candidates = _sample_instances_unique(max(1, _MAX_INS))
+        for inst in candidates:
+            base = force_https(inst).rstrip("/")
+            cache_key = f"{base}|{handle.lower()}"
+            if cache_key in _NITTER_HTML_CACHE:
+                return _NITTER_HTML_CACHE[cache_key]
 
-    for inst in candidates:
-        base = force_https(inst).rstrip("/")
-        cache_key = f"{base}|{handle.lower()}"
-        if cache_key in _NITTER_HTML_CACHE:
-            return _NITTER_HTML_CACHE[cache_key]
+            url = f"{base}/{handle}"
+            html, status, kind = _run_browser_fetch(url, _TIMEOUT)
 
-        url = f"{base}/{handle}"
-        html, status, kind = _run_browser_fetch(url, _TIMEOUT)
+            avatar_raw, avatar_norm, links = _probe_profile(html, base, handle)
+            logger.info(
+                "Nitter GET+parse: %s/%s → avatar=%s, links=%d",
+                base,
+                handle,
+                "yes" if (avatar_raw or avatar_norm) else "no",
+                len(links),
+            )
+            if avatar_raw:
+                logger.info("Avatar URL: %s", force_https(avatar_raw))
+            if links:
+                logger.info("BIO из Nitter: %s", links)
 
-        # быстрый пробный парс для логов доступности (Nitter)
-        avatar_raw, avatar_norm, links = _probe_profile(html, base, handle)
-        logger.info(
-            "Nitter GET+parse: %s/%s → avatar=%s, links=%d",
-            base,
-            handle,
-            "yes" if (avatar_raw or avatar_norm) else "no",
-            len(links),
-        )
-        if avatar_raw:
-            logger.info("Avatar URL: %s", force_https(avatar_raw))
-        if links:
-            logger.info("BIO из Nitter: %s", links)
+            if html and _html_matches_handle(html, handle) and not _looks_antibot(html):
+                _NITTER_HTML_CACHE[cache_key] = (html, base)
+                return html, base
 
-        if html and _html_matches_handle(html, handle) and not _looks_antibot(html):
-            _NITTER_HTML_CACHE[cache_key] = (html, base)
-            return html, base
+            if (
+                kind
+                or status in (0, 403, 429, 503)
+                or _looks_antibot(html)
+                or (status == 200 and not _html_matches_handle(html, handle))
+            ):
+                _ban(base)
 
-        if (
-            kind
-            or status in (0, 403, 429, 503)
-            or _looks_antibot(html)
-            or (status == 200 and not _html_matches_handle(html, handle))
-        ):
-            _ban(base)
-
-    # финальный fallback: прямой x.com/<handle> тем же runner'ом
+    # если Nitter выключен или все инстансы исчерпаны
     x_url = f"https://x.com/{handle}"
     html, status, kind = _run_browser_fetch(x_url, max(_TIMEOUT * 2, 15))
 
-    # для x.com: логируем только факт аватара и счетчик ссылок (BIO не печатаем)
     avatar_raw, avatar_norm, links = _probe_profile(html, "https://x.com", handle)
     logger.info(
         "Nitter GET+parse: %s/%s → avatar=%s, links=%d",

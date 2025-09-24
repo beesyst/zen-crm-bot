@@ -16,6 +16,7 @@ function parseArgs(argv) {
     if (a === '--html') args.html = true;
     else if (a === '--text') args.text = true;
     else if (a === '--socials') args.socials = true;
+    else if (a === '--twitterProfile') args.twitterProfile = true; // извлечь X-профиль
     else if (a === '--raw') { args.html = true; args.text = true; args.raw = true; }
     else if (a === '--js') { args.js = String(argv[++i]).toLowerCase() !== 'false'; }
     else if (a === '--url') args.url = argv[++i];
@@ -146,7 +147,7 @@ async function buildContextWithFingerprint(browser, {
     if (m) viewport = { width: Number(m[1]), height: Number(m[2]) };
   }
 
-  // вариант 1: есть ограничения (device/OS/locale/viewport) или задан UA - генерим fingerprint вручную
+  // вариант 1: принудительная генерация fingerprint (если есть ограничения/UA)
   if (devices || operatingSystems || locales || viewport || (ua && String(ua).trim())) {
     try {
       const fg = new FingerprintGenerator({
@@ -162,7 +163,6 @@ async function buildContextWithFingerprint(browser, {
       const finalLocale = (locales && locales[0]) || (fingerprint.languages && fingerprint.languages[0]) || 'en-US';
 
       const newContextOptions = {
-        // fingerprint-injector сам подставит UA из fingerprint.
         ...(ua && String(ua).trim() ? { userAgent: ua } : {}),
         viewport: finalViewport,
         locale: finalLocale,
@@ -174,11 +174,11 @@ async function buildContextWithFingerprint(browser, {
 
       return await newInjectedContext(browser, { fingerprint, newContextOptions });
     } catch (e) {
-      // падение этой ветки не критично - ниже fallback
+      // падение этой ветки не критично — ниже fallback
     }
   }
 
-  // вариант 2: дефолтная инъекция - пусть injector сам сгенерит отпечаток (UA включительно)
+  // вариант 2: инжектор сам сгенерит отпечаток
   try {
     const baseOptions = {
       ...(ua && String(ua).trim() ? { userAgent: ua } : {}),
@@ -190,7 +190,7 @@ async function buildContextWithFingerprint(browser, {
     };
     return await newInjectedContext(browser, { newContextOptions: baseOptions });
   } catch {
-    // вариант 3: чистый Playwright - без инжекции (хуже маскируется, но работает)
+    // вариант 3: чистый Playwright без инжекции
     const ctx = {
       ...(ua && String(ua).trim() ? { userAgent: ua } : {}),
       javaScriptEnabled: js !== false,
@@ -221,6 +221,7 @@ async function browserFetch(opts) {
     fpOS,
     fpLocales,
     fpViewport,
+    twitterProfile = false, // флаг X-профиля
   } = opts || {};
 
   if (!url) throw new Error('url is required');
@@ -263,6 +264,9 @@ async function browserFetch(opts) {
         try { consoleLogs.push({ type: msg.type(), text: msg.text() }); } catch {}
       });
 
+      // блокировка «тяжёлых» ресурсов можно добавить при необходимости
+      // await page.route('**/*', (route) => { ... });
+
       // надежная навигация с несколькими попытками
       async function robustGoto(p, targetUrl) {
         const tries = [
@@ -299,7 +303,7 @@ async function browserFetch(opts) {
         });
       } catch {}
 
-      // подождать футер/социалки/JSON-LD - частый источник ссылок
+      // подождать футер/социалки/JSON-LD
       try {
         await page.waitForSelector(
           'footer a[href], [role="contentinfo"] a[href], [class*="social"] a[href]',
@@ -488,12 +492,115 @@ async function browserFetch(opts) {
       const antiBot = await detectAntiBot(page, resp);
       const timing = { startedAt, finishedAt: Date.now(), ms: Date.now() - startedAt };
 
+      // X-профиль (опционально)
+      let twitter_profile = null;
+      if (twitterProfile && /^https?:\/\/(?:www\.)?(?:x\.com|twitter\.com)\/[A-Za-z0-9_]{1,15}(?:[\/?#].*)?$/i.test(finalUrl)) {
+        twitter_profile = await page.evaluate(() => {
+          const pick = (sel) => (document.querySelector(sel)?.textContent || '').trim();
+
+          const name = pick('div[data-testid="UserName"] span');
+          const bio  = pick('div[data-testid="UserDescription"]');
+
+          const verified = !!document.querySelector('div[data-testid="UserName"] svg[aria-label*="Verified"], div[data-testid="UserName"] svg[aria-label*="Подтвержден"]');
+
+          // avatar
+          let avatar = document.querySelector('img[src*="profile_images"]')?.getAttribute('src') || '';
+          if (!avatar) {
+            const styles = Array.from(document.querySelectorAll('div[style*="background-image"]')).map(n => n.getAttribute('style') || '');
+            for (const s of styles) {
+              const m = s.match(/url\("?(https?:\/\/pbs\.twimg\.com\/profile_images\/[^")]+)"?\)/i);
+              if (m && m[1]) { avatar = m[1]; break; }
+            }
+          }
+
+          // banner
+          let banner = '';
+          {
+            const nodes = Array.from(document.querySelectorAll('div[style*="background-image"]'));
+            for (const n of nodes) {
+              const m = String(n.getAttribute('style') || '').match(/url\("?(https?:\/\/pbs\.twimg\.com\/profile_banners\/[^")]+)"?\)/i);
+              if (m && m[1]) { banner = m[1]; break; }
+            }
+          }
+
+          // links из BIO и UserUrl (под шапкой)
+          const entries = [];
+          document.querySelectorAll('div[data-testid="UserDescription"] a[href], div[data-testid="UserProfileHeader_Items"] a[href]').forEach(a => {
+            const href = (a.getAttribute('href') || '').trim();
+            const expanded = (a.getAttribute('data-expanded-url') || a.getAttribute('title') || '').trim();
+            const text = (a.textContent || '').trim();
+            if (href) entries.push({ href, expanded, text });
+          });
+
+          const abs = (h) => { try { return h && h.startsWith('http') ? h : new URL(h, location.href).href; } catch { return h; } };
+
+          // Если href = t.co и нет expanded - пробуем восстановить по видимому тексту (например "staderlabs.com" или "linktr.ee/xpla_official")
+          function textToUrlMaybe(s) {
+            const t = (s || '').trim();
+            if (!t) return '';
+            // домен или домен/путь
+            if (/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?:\/[^\s]*)?$/.test(t)) {
+              return t.startsWith('http') ? t : 'https://' + t;
+            }
+            return '';
+          }
+
+          const links = Array.from(new Set(entries.map(e => {
+            // приоритет: expanded от t.co
+            if (/^https?:\/\/t\.co\//i.test(e.href) && e.expanded) {
+              return abs(e.expanded);
+            }
+            // если expanded нет — пытаемся понять по видимому тексту ссылки
+            if (/^https?:\/\/t\.co\//i.test(e.href)) {
+              const guess = textToUrlMaybe(e.text);
+              if (guess) return abs(guess);
+            }
+            return abs(e.href);
+          })));
+
+          // счетчики
+          const countersRaw = Array.from(document.querySelectorAll(
+            'a[href$="/following"], a[href$="/verified_followers"], a[href$="/followers"], a[href$="/posts"], a[href$="/with_replies"]'
+          )).map(n => (n.textContent || '').replace(/\s+/g,' ').trim().toLowerCase());
+          function humanToNum(s) {
+            if (!s) return null;
+            const x = s.replace(/\s/g,'').replace(',', '.');
+            const mul = /(k|тыс|тис|тыс\.)$/.test(x) ? 1e3 : /(m|млн|млн\.)$/.test(x) ? 1e6 : /(b|млрд|млрд\.)$/.test(x) ? 1e9 : null;
+            if (mul) {
+              const num = parseFloat(x.replace(/(k|m|b|тыс|тис|млн|млрд|\.)+$/g, ''));
+              return Number.isFinite(num) ? Math.round(num * mul) : null;
+            }
+            const d = x.replace(/[^\d]/g, '');
+            return d ? Number(d) : null;
+          }
+          let following=null, followers=null, posts=null;
+          for (const t of countersRaw) {
+            if (t.includes('following') || t.includes('подписки')) {
+              const m = t.match(/([\d.,\sкккmkmbмлрдмлнтыстис]+)/i); if (m) following = humanToNum(m[1]);
+            } else if (t.includes('followers') || t.includes('подписчики') || t.includes('подписчиков')) {
+              const m = t.match(/([\d.,\sкккmkmbмлрдмлнтыстис]+)/i); if (m) followers = humanToNum(m[1]);
+            } else if (t.includes('posts') || t.includes('tweets') || t.includes('твиты') || t.includes('посты')) {
+              const m = t.match(/([\д.,\sкккmkmbмлрдмлнтыстис]+)/i); if (m) posts = humanToNum(m[1]);
+            }
+          }
+
+          return {
+            name, bio, verified,
+            avatar: avatar || '',
+            banner: banner || '',
+            links,
+            counts: { followers, following, posts },
+          };
+        });
+      }
+
       return {
         ok, status, url, finalUrl, title,
         html: bodyHtml, text: bodyText,
         headers: headersObj, cookies: cookiesOut,
         console: consoleLogs, timing, antiBot,
         website: url,
+        ...(twitter_profile ? { twitter_profile } : {}),
         ...socials,
       };
     } finally {

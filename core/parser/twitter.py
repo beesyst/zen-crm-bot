@@ -14,6 +14,7 @@ from core.normalize import force_https
 from core.parser.nitter import parse_profile
 from core.settings import (
     get_http_ua,
+    get_nitter_cfg,
     get_social_keys,
 )
 
@@ -24,11 +25,13 @@ from .link_aggregator import (
 )
 
 logger = get_logger("twitter")
+AGG_LOGGER = get_logger("link_aggregator")
 UA = get_http_ua()
-
 
 # Кэш уже распарсенных профилей X
 _PARSED_CACHE: Dict[str, Dict] = {}
+NITTER_CFG = get_nitter_cfg() or {}
+NITTER_ENABLED = bool(NITTER_CFG.get("enabled", True))
 
 
 # Хелпер: достаем домен из URL без www
@@ -90,6 +93,20 @@ def normalize_twitter_avatar(url: str | None) -> str:
 
     # убрать query/fragment
     u = re.sub(r"(?:\?[^#]*)?(?:#.*)?$", "", u)
+
+    # если это pbs.twimg.com и размер маленький - поднимаем до 400x400
+    try:
+        p = urlparse(u)
+        if (p.netloc or "").endswith("pbs.twimg.com"):
+            u = re.sub(
+                r"_(?:normal|bigger|mini|200x200)\.(jpg|png)$",
+                r"_400x400.\1",
+                u,
+                flags=re.I,
+            )
+    except Exception:
+        pass
+
     return u
 
 
@@ -110,14 +127,13 @@ def _decode_nitter_pic_url(src: str) -> str:
     return s
 
 
-# Запускаем playwright-скрипт как запасной вариант (прямой X)
-def _run_playwright(u: str, timeout: int = 60) -> dict:
+# Универсальный playwright-фетчер (прямой X) через browser_fetch.js
+def _run_browser_fetch_x(u: str, timeout: int = 60) -> dict:
     host = urlparse(u).netloc.lower().replace("www.", "")
     if host not in ("x.com", "twitter.com"):
         return {}
-    script = os.path.join(os.path.dirname(__file__), "twitter_scraper.js")
+    script = os.path.join(os.path.dirname(__file__), "browser_fetch.js")
     try:
-        # twitter_scraper.js ожидает флаги --url и --timeout (мс)
         res = subprocess.run(
             [
                 "node",
@@ -130,10 +146,9 @@ def _run_playwright(u: str, timeout: int = 60) -> dict:
                 "1",
                 "--wait",
                 "domcontentloaded",
-                "--prefer",
-                "x",
                 "--ua",
                 UA or "",
+                "--twitterProfile",
             ],
             cwd=os.path.dirname(script),
             capture_output=True,
@@ -141,7 +156,7 @@ def _run_playwright(u: str, timeout: int = 60) -> dict:
             timeout=timeout + 5,
         )
     except Exception as e:
-        logger.warning("twitter_scraper.js run error for %s: %s", u, e)
+        logger.warning("browser_fetch.js run error for %s: %s", u, e)
         return {}
     try:
         raw = (res.stdout or "").strip()
@@ -149,6 +164,120 @@ def _run_playwright(u: str, timeout: int = 60) -> dict:
     except Exception:
         data = {}
     return data if isinstance(data, dict) else {}
+
+
+# Вспомогательная функция: привести "голую" ссылку к https://
+def _coerce_url(u: str) -> str:
+    s = (u or "").strip()
+    if not s:
+        return ""
+    if s.startswith("http://") or s.startswith("https://"):
+        return s
+    if s.startswith("www."):
+        return "https://" + s
+    # простая эвристика: домен.tld/...
+    if re.match(r"^[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?:/.*)?$", s):
+        return "https://" + s
+    return s
+
+
+# Достать все URL из произвольного текста (BIO/visible text)
+def _extract_urls_from_text(text: str) -> list[str]:
+    s = text or ""
+    urls: list[str] = []
+    # явные http/https
+    for m in re.finditer(r"https?://[^\s<>\]]+", s, re.I):
+        urls.append(m.group(0))
+    # www. и доменные ссылки без схемы (редко, но встречается)
+    for m in re.finditer(r"\b(?:www\.)[^\s<>\]]+", s, re.I):
+        urls.append(m.group(0))
+    for m in re.finditer(r"\b[A-Za-z0-9.-]+\.[A-Za-z]{2,}/[^\s<>\]]+", s, re.I):
+        urls.append(m.group(0))
+    # нормализация + дедуп
+    out, seen = [], set()
+    for u in urls:
+        uu = force_https(_coerce_url(u)).rstrip("/")
+        if uu and uu not in seen:
+            out.append(uu)
+            seen.add(uu)
+    return out
+
+
+# Вспомогательная функция рядом с остальными хелперами
+def _expand_short_links(urls: list[str], timeout: int = 8) -> list[str]:
+    SHORTENERS = {
+        "t.co",
+        "bit.ly",
+        "tinyurl.com",
+        "ow.ly",
+        "buff.ly",
+        "t.ly",
+        "shorturl.at",
+    }
+    out = []
+    for u in urls or []:
+        try:
+            u = force_https(u)
+            h = _host(u)
+            if h in SHORTENERS:
+                r = requests.get(
+                    u,
+                    headers={
+                        "User-Agent": UA,
+                        "Referer": "https://x.com/",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    },
+                    timeout=timeout,
+                    allow_redirects=True,
+                )
+                final = force_https(r.url or u)
+                # удаляем шумовые UTM-метки
+                try:
+                    from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
+                    p = urlparse(final)
+                    q = [
+                        (k, v)
+                        for (k, v) in parse_qsl(p.query, keep_blank_values=True)
+                        if k.lower()
+                        not in {
+                            "utm_source",
+                            "utm_medium",
+                            "utm_campaign",
+                            "utm_term",
+                            "utm_content",
+                            "ref",
+                            "source",
+                            "s",
+                        }
+                    ]
+                    final = (
+                        urlunparse(
+                            (
+                                p.scheme,
+                                p.netloc,
+                                p.path.rstrip("/"),
+                                p.params,
+                                urlencode(q),
+                                "",
+                            )
+                        )
+                        or final
+                    )
+                except Exception:
+                    pass
+                out.append(final)
+            else:
+                out.append(u.rstrip("/"))
+        except Exception:
+            out.append(force_https(u).rstrip("/"))
+    # Дедуп
+    seen, deduped = set(), []
+    for u in out:
+        if u and u not in seen:
+            seen.add(u)
+            deduped.append(u)
+    return deduped
 
 
 # Получаем профиль X: {links, avatar, name} (сперва nitter, затем playwright при необходимости)
@@ -163,61 +292,152 @@ def get_links_from_x_profile(
     if cached and (not need_avatar or (cached.get("avatar") or "").strip()):
         return cached
 
-    # сначала nitter
-    parsed = parse_profile(safe) or {}
+    parsed: dict = {}
 
-    # если nitter не дал вообще ничего или дал без ссылок - пробуем playwright
-    if (not parsed) or not (parsed.get("links") or []):
-        tries = [safe, safe.rstrip("/") + "/photo"] if need_avatar else [safe]
-        for u in tries:
-            data = _run_playwright(u)
-            avatar_js = (data.get("avatar") or "") or (
-                (data.get("images") or {}).get("avatar") or ""
-            )
-            if data.get("links") or avatar_js or data.get("name"):
+    # если nitter вкл - пробуем его первым
+    if NITTER_ENABLED:
+        parsed = parse_profile(safe) or {}
+
+    # playwright
+    need_pw = (not NITTER_ENABLED) or (
+        not (parsed.get("links") or [])
+        or (need_avatar and not (parsed.get("avatar") or "").strip())
+    )
+
+    if need_pw:
+        if not NITTER_ENABLED:
+            logger.info("[twitter] Nitter disabled → using Playwright: %s", safe)
+        # при выключенном nitter - всегда пробуем и /photo, чтобы вытащить аву
+        tries = (
+            [safe, safe.rstrip("/") + "/photo"]
+            if (need_avatar or not NITTER_ENABLED)
+            else [safe]
+        )
+        for try_url in tries:
+            data = _run_browser_fetch_x(try_url)
+
+            tp = data.get("twitter_profile") or {}
+            avatar_js = (tp.get("avatar") or "").strip()
+            name_js = (tp.get("name") or "").strip()
+
+            # ссылки из JS-структуры
+            links_raw = list(tp.get("links") or [])
+
+            # бэкап: старый формат
+            if not links_raw and isinstance(data.get("links"), list):
+                links_raw = list(data.get("links") or [])
+
+            # ссылки из блока "UserUrl" (под био). Пытаемся взять прямые поля, а если их нет - распарсить html
+            header_urls: list[str] = []
+
+            # частые поля, которые отдают парсером (на всякий случай поддерживаем набор ключей)
+            for key in ("url", "website", "user_url", "userUrl", "header_links"):
+                v = tp.get(key)
+                if isinstance(v, str) and v:
+                    header_urls.extend(_extract_urls_from_text(v))
+                elif isinstance(v, list):
+                    for it in v:
+                        if isinstance(it, str):
+                            header_urls.extend(_extract_urls_from_text(it))
+
+            # fallback: если парсер вернул html профиля - выдернем href из data-testid="UserUrl"
+            html_profile = (tp.get("html") or "") or (data.get("html") or "")
+            if html_profile:
+                try:
+                    # href у ссылки с data-testid="UserUrl"
+                    for m in re.finditer(
+                        r'data-testid="UserUrl"[^>]*href="([^"]+)"',
+                        html_profile,
+                        flags=re.I,
+                    ):
+                        header_urls.append(urljoin(safe, m.group(1)))
+                except Exception:
+                    pass
+
+            # нормализуем и дедупим header_urls
+            header_urls = [
+                force_https(_coerce_url(u)).rstrip("/") for u in header_urls if u
+            ]
+            _seen_h, _hdr = set(), []
+            for u in header_urls:
+                if u and u not in _seen_h:
+                    _hdr.append(u)
+                    _seen_h.add(u)
+            header_urls = _hdr
+
+            # достаем реальные URL из видимого BIO-текста
+            bio_text = (tp.get("bio") or "").strip()
+            bio_urls = _extract_urls_from_text(bio_text)
+
+            # объединяем: сначала сырые (возможно t.co), затем видимые из BIO (обычно уже linktr.ee / офсайт)
+            merged = []
+            seen = set()
+            for cand in links_raw + header_urls + bio_urls:
+                uu = force_https(cand).rstrip("/")
+                if uu and uu not in seen:
+                    merged.append(uu)
+                    seen.add(uu)
+
+            links_js = _expand_short_links(merged)
+
+            # выкидываем коротыши (t.co и пр.), если уже появились развернутые аналоги
+            SHORTENER_HOSTS = {
+                "t.co",
+                "bit.ly",
+                "tinyurl.com",
+                "ow.ly",
+                "buff.ly",
+                "t.ly",
+                "shorturl.at",
+            }
+
+            def _host_only(u: str) -> str:
+                try:
+                    return urlparse(u).netloc.lower().replace("www.", "")
+                except Exception:
+                    return ""
+
+            links_js = [u for u in links_js if _host_only(u) not in SHORTENER_HOSTS]
+
+            if links_js or avatar_js or name_js:
                 logger.info(
-                    "Playwright direct GET+parse: %s → avatar=%s, links=%d",
-                    u,
-                    "yes" if (avatar_js or "").strip() else "no",
-                    len(data.get("links") or []),
+                    "Playwright GET+parse: %s → avatar=%s, links=%d",
+                    try_url,
+                    "yes" if avatar_js else "no",
+                    len(links_js),
                 )
+                if avatar_js:
+                    logger.info(
+                        "Avatar URL: %s", normalize_twitter_avatar(avatar_js)
+                    )
+                if links_js:
+                    logger.info("BIO из X: %s", links_js)
+
                 parsed = {
-                    "links": data.get("links") or [],
-                    "avatar": normalize_twitter_avatar(avatar_js or ""),
-                    "name": data.get("name") or "",
+                    "links": links_js,
+                    "avatar": normalize_twitter_avatar(avatar_js),
+                    "name": name_js,
                 }
                 break
 
-    # если nitter что-то дал, но нет аватара, а он нужен - playwright
-    elif need_avatar and not (parsed.get("avatar") or "").strip():
-        tries = [safe, safe.rstrip("/") + "/photo"]
-        for u in tries:
-            data = _run_playwright(u)
-            avatar_js = (data.get("avatar") or "") or (
-                (data.get("images") or {}).get("avatar") or ""
-            )
-            if data.get("links") or avatar_js or data.get("name"):
-                logger.info(
-                    "Playwright avatar fallback: %s → avatar=%s, links=%d",
-                    u,
-                    "yes" if (avatar_js or "").strip() else "no",
-                    len(data.get("links") or []),
-                )
-                parsed = {
-                    "links": parsed.get("links") or [] or data.get("links") or [],
-                    "avatar": normalize_twitter_avatar(
-                        avatar_js or parsed.get("avatar") or ""
-                    ),
-                    "name": parsed.get("name") or data.get("name") or "",
-                }
-                break
+            else:
+                err = (data.get("timing") or {}).get("error") or ""
+                fin = data.get("finalUrl") or ""
+                if err or fin:
+                    logger.info(
+                        "[twitter] Playwright пустой ответ: %s (final=%s, error=%s)",
+                        try_url,
+                        fin,
+                        err,
+                    )
+                else:
+                    logger.info("[twitter] Playwright пустой ответ: %s", try_url)
 
     out = {
         "links": parsed.get("links") or [],
         "avatar": normalize_twitter_avatar(parsed.get("avatar") or ""),
         "name": parsed.get("name") or "",
     }
-
     _PARSED_CACHE[safe] = out
     return out
 
@@ -421,6 +641,12 @@ def verify_twitter_and_enrich(
             if has_official_site and not bits.get("website") and site_domain_norm:
                 bits["website"] = f"https://www.{site_domain_norm}/"
 
+            AGG_LOGGER.info(
+                "Агрегатор %s подтвержден и спарсен: %s",
+                agg_norm,
+                json.dumps(bits, ensure_ascii=False),
+            )
+            logger.info("X подтвержден: %s", twitter_url)
             return True, bits, agg_norm
 
     if aggs:
