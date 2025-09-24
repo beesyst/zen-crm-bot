@@ -10,7 +10,7 @@ from urllib.parse import unquote, urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 from core.log_setup import get_logger
-from core.normalize import force_https
+from core.normalize import force_https, twitter_list_to_x, twitter_to_x
 from core.parser.nitter import parse_profile
 from core.settings import (
     get_http_ua,
@@ -306,7 +306,7 @@ def get_links_from_x_profile(
 
     if need_pw:
         if not NITTER_ENABLED:
-            logger.info("[twitter] Nitter disabled → using Playwright: %s", safe)
+            logger.info("Nitter отключен → включаем Playwright: %s", safe)
         # при выключенном nitter - всегда пробуем и /photo, чтобы вытащить аву
         tries = (
             [safe, safe.rstrip("/") + "/photo"]
@@ -315,6 +315,12 @@ def get_links_from_x_profile(
         )
         for try_url in tries:
             data = _run_browser_fetch_x(try_url)
+
+            # централизованная нормализация на Python-уровне
+            if isinstance(data.get("twitter"), str):
+                data["twitter"] = twitter_to_x(data.get("twitter", ""))
+            if isinstance(data.get("twitter_all"), list):
+                data["twitter_all"] = twitter_list_to_x(data.get("twitter_all"))
 
             tp = data.get("twitter_profile") or {}
             avatar_js = (tp.get("avatar") or "").strip()
@@ -407,9 +413,7 @@ def get_links_from_x_profile(
                     len(links_js),
                 )
                 if avatar_js:
-                    logger.info(
-                        "Avatar URL: %s", normalize_twitter_avatar(avatar_js)
-                    )
+                    logger.info("Avatar URL: %s", normalize_twitter_avatar(avatar_js))
                 if links_js:
                     logger.info("BIO из X: %s", links_js)
 

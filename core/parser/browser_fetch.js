@@ -74,46 +74,6 @@ async function detectAntiBot(page, response) {
   return { detected: false, kind: '', server: '' };
 }
 
-// Нормализация twitter → x.com
-function normalizeTwitter(u) {
-  try {
-    if (!u) return u;
-    const s = String(u);
-    let m = s.match(/^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([A-Za-z0-9_]{1,15})(?:[\/?#].*)?$/i);
-    if (m) return `https://x.com/${m[1]}`;
-
-    if (/^https?:\/\/(?:www\.)?twitter\.com\/intent\/(?:follow|user)/i.test(s)) {
-      const url = new URL(s);
-      const screen = (url.searchParams.get('screen_name') || '').trim();
-      if (/^[A-Za-z0-9_]{1,15}$/.test(screen)) return `https://x.com/${screen}`;
-    }
-
-    if (s.includes('redirect_after_login')) {
-      const url = new URL(s);
-      const redir = url.searchParams.get('redirect_after_login') || '';
-      const dec = decodeURIComponent(redir || '');
-      let m2 = dec.match(/^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([A-Za-z0-9_]{1,15})(?:[\/?#].*)?$/i);
-      if (m2) return `https://x.com/${m2[1]}`;
-      let m3 = dec.match(/^\/([A-Za-z0-9_]{1,15})(?:[\/?#].*)?$/);
-      if (m3) return `https://x.com/${m3[1]}`;
-    }
-
-    if (s.includes('?')) {
-      const url = new URL(s);
-      for (const key of ['url','u','to','target','redirect','redirect_uri']) {
-        const cand = url.searchParams.get(key);
-        if (cand) {
-          const dec = decodeURIComponent(cand);
-          const mm = dec.match(/^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([A-Za-z0-9_]{1,15})(?:[\/?#].*)?$/i);
-          if (mm) return `https://x.com/${mm[1]}`;
-        }
-      }
-    }
-
-    return s.replace(/https?:\/\/(www\.)?twitter\.com/i, 'https://x.com').replace(/[\/?#].*$/, '');
-  } catch { return u; }
-}
-
 // Контекст с отпечатком
 async function buildContextWithFingerprint(browser, {
   targetUrl,
@@ -174,7 +134,6 @@ async function buildContextWithFingerprint(browser, {
 
       return await newInjectedContext(browser, { fingerprint, newContextOptions });
     } catch (e) {
-      // падение этой ветки не критично — ниже fallback
     }
   }
 
@@ -221,7 +180,7 @@ async function browserFetch(opts) {
     fpOS,
     fpLocales,
     fpViewport,
-    twitterProfile = false, // флаг X-профиля
+    twitterProfile = false,
   } = opts || {};
 
   if (!url) throw new Error('url is required');
@@ -263,9 +222,6 @@ async function browserFetch(opts) {
       page.on('console', (msg) => {
         try { consoleLogs.push({ type: msg.type(), text: msg.text() }); } catch {}
       });
-
-      // блокировка «тяжёлых» ресурсов можно добавить при необходимости
-      // await page.route('**/*', (route) => { ... });
 
       // надежная навигация с несколькими попытками
       async function robustGoto(p, targetUrl) {
@@ -458,15 +414,6 @@ async function browserFetch(opts) {
         return { ...acc, twitter_all: Array.from(twitterAll) };
       }, url);
 
-      // нормализация twitter → x.com
-      if (socials.twitter) socials.twitter = normalizeTwitter(socials.twitter || '');
-      if (Array.isArray(socials.twitter_all)) {
-        const filt = socials.twitter_all
-          .map(u => normalizeTwitter(u || ''))
-          .filter(u => /^https?:\/\/(?:www\.)?(?:x\.com|twitter\.com)\/[A-Za-z0-9_]{1,15}\/?$/.test(u));
-        socials.twitter_all = Array.from(new Set(filt));
-      }
-
       // HTML/TEXT по запросу
       let bodyHtml = null;
       let bodyText = null;
@@ -550,7 +497,7 @@ async function browserFetch(opts) {
             if (/^https?:\/\/t\.co\//i.test(e.href) && e.expanded) {
               return abs(e.expanded);
             }
-            // если expanded нет — пытаемся понять по видимому тексту ссылки
+            // если expanded нет - пытаемся понять по видимому тексту ссылки
             if (/^https?:\/\/t\.co\//i.test(e.href)) {
               const guess = textToUrlMaybe(e.text);
               if (guess) return abs(guess);

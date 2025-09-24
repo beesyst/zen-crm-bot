@@ -88,8 +88,9 @@ zen-crm-bot/
 │       └── package.json    
 │   ├── parser/                      # Парсеры: веб, YouTube, X (Nitter/скрейпер), и т.д.
 │       ├── browser_fetch.js         # Вызовы Playwright из node (headless fetch)
+│       ├── contact.py               # 
 │       ├── link_aggregator.py       # Слияние/чистка ссылок, эвристики
-│       ├── twitter_scraper.js       # JS-скрейпер X (fallback)
+│       ├── nitter.py                # 
 │       ├── twitter.py               # Добыча ссылок/метаданных из X (через Nitter/скрейпер)
 │       ├── web.py                   # Парсер сайтов (главная/документация/соц-иконки)
 │       └── youtube.py               # Извлечение каналов/ссылок YouTube         
@@ -105,7 +106,8 @@ zen-crm-bot/
 │   ├── normalize.py                 # Нормализация брендов/доменов (для логов и storage)
 │   ├── orchestrator.py              # Оркестратор пайплайнов research/enrich (консоль+файловый лог)
 │   ├── paths.py                     # Все пути проекта (storage/logs/config и т.п.)
-│   └── settings.py                  # Чтение settings.yml и вспомогательные флаги/образы
+│   ├── settings.py                  # Чтение settings.yml и вспомогательные флаги/образы
+│   └── tpl.py                       # 
 │
 ├── db/                              # Заглушка под миграции и SQL (если потребуется)
 │

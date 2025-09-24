@@ -198,6 +198,18 @@ def twitter_to_x(u: str | None) -> str:
     # иначе - просто чистим хвосты, но без насильной канонизации
     return s.rstrip("/")
 
+# Хелпер для списков твиттер-URL
+def twitter_list_to_x(urls: list[str] | None) -> list[str]:
+    out: list[str] = []
+    seen = set()
+    for u in urls or []:
+        nu = twitter_to_x(u)
+        if nu and re.match(r"^https://(?:www\.)?x\.com/[A-Za-z0-9_]{1,15}$", nu, re.I):
+            if nu not in seen:
+                out.append(nu)
+                seen.add(nu)
+    return out
+
 
 # Нормализация словаря соц-ссылок: https + уборка трекинга + трим/слэш
 def normalize_socials(socials: dict | None) -> dict:
