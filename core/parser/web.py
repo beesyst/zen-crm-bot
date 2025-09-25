@@ -262,8 +262,13 @@ def has_social_links(html: str) -> bool:
 
 
 # Запуск Node-скрипта (Playwright) для HTML/соц-json
-def _browser_fetch(path_js, url, timeout=60, wait="networkidle", mode="html") -> dict:
+def _playwright(path_js, url, timeout=60, wait="networkidle", mode="html") -> dict:
     try:
+        from core.settings import get_social_host_map
+
+        _HOST_MAP = get_social_host_map() or {}
+        social_hosts = ",".join(sorted(set(_HOST_MAP.keys())))
+
         args = [
             "node",
             path_js,
@@ -277,6 +282,8 @@ def _browser_fetch(path_js, url, timeout=60, wait="networkidle", mode="html") ->
             "2",
             "--ua",
             UA,
+            "--waitSocialHosts",
+            social_hosts,
         ]
         if mode == "html":
             args.append("--html")
@@ -296,14 +303,14 @@ def _browser_fetch(path_js, url, timeout=60, wait="networkidle", mode="html") ->
         except Exception:
             return {"ok": False, "html": "", "text": "", "error": raw}
     except Exception as e:
-        logger.warning("browser_fetch failed for %s: %s", url, e)
+        logger.warning("playwright failed for %s: %s", url, e)
         return {"ok": False, "html": "", "text": "", "error": str(e)}
 
 
 # Получить HTML через Playwright (если нужен JS)
 def fetch_url_html_playwright(url, timeout=60, wait="networkidle", mode="html") -> str:
-    script_path = os.path.join(os.path.dirname(__file__), "browser_fetch.js")
-    res = _browser_fetch(script_path, url, timeout=timeout, wait=wait, mode=mode)
+    script_path = os.path.join(os.path.dirname(__file__), "playwright.js")
+    res = _playwright(script_path, url, timeout=timeout, wait=wait, mode=mode)
     try:
         return json.dumps(res, ensure_ascii=False)
     except Exception:
@@ -746,7 +753,7 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
     links["document"] = doc or ""
 
     if is_main_page and (not any(links[k] for k in _SOCIAL_KEYS if k != "website")):
-        logger.info("browser_fetch socials partial fill: %s", base_url)
+        logger.info("playwright socials partial fill: %s", base_url)
         payload = fetch_url_html_playwright(
             base_url, timeout=60, wait="networkidle", mode="socials"
         )

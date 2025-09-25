@@ -127,12 +127,12 @@ def _decode_nitter_pic_url(src: str) -> str:
     return s
 
 
-# Универсальный playwright-фетчер (прямой X) через browser_fetch.js
-def _run_browser_fetch_x(u: str, timeout: int = 60) -> dict:
+# Универсальный playwright-фетчер (прямой X) через playwright.js
+def _run_playwright_x(u: str, timeout: int = 60) -> dict:
     host = urlparse(u).netloc.lower().replace("www.", "")
     if host not in ("x.com", "twitter.com"):
         return {}
-    script = os.path.join(os.path.dirname(__file__), "browser_fetch.js")
+    script = os.path.join(os.path.dirname(__file__), "playwright.js")
     try:
         res = subprocess.run(
             [
@@ -156,7 +156,7 @@ def _run_browser_fetch_x(u: str, timeout: int = 60) -> dict:
             timeout=timeout + 5,
         )
     except Exception as e:
-        logger.warning("browser_fetch.js run error for %s: %s", u, e)
+        logger.warning("playwright.js run error for %s: %s", u, e)
         return {}
     try:
         raw = (res.stdout or "").strip()
@@ -306,7 +306,7 @@ def get_links_from_x_profile(
 
     if need_pw:
         if not NITTER_ENABLED:
-            logger.info("Nitter отключен → включаем Playwright: %s", safe)
+            logger.info("Nitter выключен → включаем Playwright: %s", safe)
         # при выключенном nitter - всегда пробуем и /photo, чтобы вытащить аву
         tries = (
             [safe, safe.rstrip("/") + "/photo"]
@@ -314,7 +314,7 @@ def get_links_from_x_profile(
             else [safe]
         )
         for try_url in tries:
-            data = _run_browser_fetch_x(try_url)
+            data = _run_playwright_x(try_url)
 
             # централизованная нормализация на Python-уровне
             if isinstance(data.get("twitter"), str):

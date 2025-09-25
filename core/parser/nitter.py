@@ -95,9 +95,9 @@ def _looks_antibot(text: str) -> bool:
     return any(s in low for s in needles) or len(low) < 400
 
 
-# Утилита: поход в URL через локальный browser_fetch.js (без [web]-логов)
-def _run_browser_fetch(url: str, timeout_sec: int) -> tuple[str, int, str]:
-    script = os.path.join(os.path.dirname(__file__), "browser_fetch.js")
+# Утилита: поход в URL через локальный playwright.js (без [web]-логов)
+def _run_playwright(url: str, timeout_sec: int) -> tuple[str, int, str]:
+    script = os.path.join(os.path.dirname(__file__), "playwright.js")
     args = [
         "node",
         script,
@@ -112,6 +112,8 @@ def _run_browser_fetch(url: str, timeout_sec: int) -> tuple[str, int, str]:
         "--ua",
         UA,
         "--raw",
+        "--nitter",
+        "true",
     ]
     try:
         res = subprocess.run(
@@ -122,7 +124,7 @@ def _run_browser_fetch(url: str, timeout_sec: int) -> tuple[str, int, str]:
             timeout=max(timeout_sec + 5, 15),
         )
     except Exception as e:
-        logger.debug("browser_fetch run error for %s: %s", url, e)
+        logger.debug("playwright run error for %s: %s", url, e)
         return "", 0, "runner_failed"
 
     raw = (res.stdout or "").strip()
@@ -318,7 +320,7 @@ def fetch_profile_html(handle: str) -> tuple[str, str]:
                 return _NITTER_HTML_CACHE[cache_key]
 
             url = f"{base}/{handle}"
-            html, status, kind = _run_browser_fetch(url, _TIMEOUT)
+            html, status, kind = _run_playwright(url, _TIMEOUT)
 
             avatar_raw, avatar_norm, links = _probe_profile(html, base, handle)
             logger.info(

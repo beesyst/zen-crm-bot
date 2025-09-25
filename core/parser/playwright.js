@@ -31,13 +31,21 @@ function parseArgs(argv) {
     } else if (a === '--retries') {
       args.retries = Math.max(0, Number(argv[++i]) || 0);
     }
-    // fingerprint options (все опционально)
-    else if (a === '--fp-device') args.fpDevice = argv[++i];           // desktop|mobile|tablet
-    else if (a === '--fp-os') args.fpOS = argv[++i];                   // windows|linux|macos|ios|android
-    else if (a === '--fp-locales') args.fpLocales = argv[++i];         // "en-US,ru-RU"
-    else if (a === '--fp-viewport') args.fpViewport = argv[++i];       // "1366x768"
+    // универсальный список соц-домов для ожидания (CSV)
+    else if (a === '--waitSocialHosts') {
+      const csv = String(argv[++i] || '').trim();
+      args.waitSocialHosts = csv ? csv.split(',').map(s => s.trim().toLowerCase()).filter(Boolean) : [];
+    }
+    // режим nitter (включает профильные селекторы)
+    else if (a === '--nitter') {
+      args.nitter = String(argv[++i] || '').toLowerCase() !== 'false';
+    }
+    // fingerprint options ...
+    else if (a === '--fp-device') args.fpDevice = argv[++i];
+    else if (a === '--fp-os') args.fpOS = argv[++i];
+    else if (a === '--fp-locales') args.fpLocales = argv[++i];
+    else if (a === '--fp-viewport') args.fpViewport = argv[++i];
     else if (!a.startsWith('-') && !positionalUrl) {
-      // Поддержка вызова: node browser_fetch.js <URL> [--raw]
       positionalUrl = a;
     }
   }
@@ -242,21 +250,61 @@ async function browserFetch(opts) {
 
       const resp = await robustGoto(page, url);
 
-      // софт прогрев SPA (скролл) - без знания о конкретных доменах
-      try { await page.waitForTimeout(800); } catch {}
+      // подождать любые соц-домены из args.waitSocialHosts
+      async function waitForAnySocialHost(page, hosts, ms) {
+        if (!Array.isArray(hosts) || hosts.length === 0) return;
+        try {
+          await page.waitForFunction((arr) => {
+            const H = (arr || []).map(s => String(s || '').toLowerCase());
+            const as = Array.from(document.querySelectorAll('a[href]'));
+            for (const a of as) {
+              const href = String(a.getAttribute('href') || '').toLowerCase();
+              if (!href) continue;
+              // простая проверка подстроки: подходит и для абсолютных, и для относительных, и для //host
+              if (H.some(h => href.includes(h))) return true;
+              try {
+                const abs = new URL(href, location.href).href.toLowerCase();
+                if (H.some(h => abs.includes(h))) return true;
+              } catch {}
+            }
+            const hasLd = !!document.querySelector('script[type="application/ld+json"]');
+            return hasLd;
+          }, { timeout: ms }, hosts);
+        } catch {}
+      }
+
+      const isLikelyNitter = (() => {
+        try {
+          const h1 = new URL(url).hostname || '';
+          return /(^|\.)nitter\./i.test(h1) || /nitter/i.test(h1);
+        } catch { return false; }
+      })();
+
+      // общий прогрев DOM (футер/контент-инфо/соц-блоки)
       try {
-        await page.evaluate(async () => {
-          const delay = (ms) => new Promise(r => setTimeout(r, ms));
-          let last = 0;
-          for (let i = 0; i < 8; i++) {
-            window.scrollTo(0, document.body.scrollHeight);
-            await delay(250);
-            const y = window.scrollY;
-            if (Math.abs(y - last) < 10) break;
-            last = y;
-          }
-        });
+        await page.waitForSelector('footer a[href], [role="contentinfo"] a[href], [class*="social"] a[href]', { timeout: 2500 });
       } catch {}
+
+      // универсальное ожидание соц-домов из Python (если переданы)
+      await waitForAnySocialHost(page, (opts && opts.waitSocialHosts) ? opts.waitSocialHosts : [], 7000);
+
+      // Nitter-режим: дождаться ключевых узлов профиля
+      if (opts && opts.nitter) {
+        try {
+          // основная карточка профиля и аватар/био/ссылки
+          await page.waitForSelector('.profile-card, .profile-bio, .profile-website, a.profile-card-avatar, img.avatar', { timeout: Math.min(9000, Math.max(3500, timeout / 3)) });
+        } catch {}
+        // софт скролл, чтобы подтолкнуть отрисовку ленивых узлов
+        try {
+          await page.evaluate(async () => {
+            const delay = (ms) => new Promise(r => setTimeout(r, ms));
+            for (let i = 0; i < 6; i++) {
+              window.scrollTo(0, document.body.scrollHeight);
+              await delay(220);
+            }
+          });
+        } catch {}
+      }
 
       // снимок по запросу
       if (screenshot) {
