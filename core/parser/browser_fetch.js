@@ -16,7 +16,7 @@ function parseArgs(argv) {
     if (a === '--html') args.html = true;
     else if (a === '--text') args.text = true;
     else if (a === '--socials') args.socials = true;
-    else if (a === '--twitterProfile') args.twitterProfile = true; // извлечь X-профиль
+    else if (a === '--twitterProfile') args.twitterProfile = true;
     else if (a === '--raw') { args.html = true; args.text = true; args.raw = true; }
     else if (a === '--js') { args.js = String(argv[++i]).toLowerCase() !== 'false'; }
     else if (a === '--url') args.url = argv[++i];
@@ -85,7 +85,6 @@ async function buildContextWithFingerprint(browser, {
   fpLocales,
   fpViewport,
 }) {
-  // ограничения для генератора отпечатка - все опционально
   let devices = undefined;
   if (fpDevice) {
     const d = String(fpDevice).toLowerCase();
@@ -107,7 +106,7 @@ async function buildContextWithFingerprint(browser, {
     if (m) viewport = { width: Number(m[1]), height: Number(m[2]) };
   }
 
-  // вариант 1: принудительная генерация fingerprint (если есть ограничения/UA)
+  // вариант 1: принудительная генерация отпечатка
   if (devices || operatingSystems || locales || viewport || (ua && String(ua).trim())) {
     try {
       const fg = new FingerprintGenerator({
@@ -162,7 +161,7 @@ async function buildContextWithFingerprint(browser, {
   }
 }
 
-// Основная функция
+// Основная функция: фетч DOM/текста + метаданных
 async function browserFetch(opts) {
   const {
     url,
@@ -223,7 +222,7 @@ async function browserFetch(opts) {
         try { consoleLogs.push({ type: msg.type(), text: msg.text() }); } catch {}
       });
 
-      // надежная навигация с несколькими попытками
+      // надежная навигация с несколькими вариантами waitUntil
       async function robustGoto(p, targetUrl) {
         const tries = [
           { waitUntil: waitUntil || 'domcontentloaded', timeout },
@@ -243,7 +242,7 @@ async function browserFetch(opts) {
 
       const resp = await robustGoto(page, url);
 
-      // софт прогрев SPA
+      // софт прогрев SPA (скролл) - без знания о конкретных доменах
       try { await page.waitForTimeout(800); } catch {}
       try {
         await page.evaluate(async () => {
@@ -259,30 +258,7 @@ async function browserFetch(opts) {
         });
       } catch {}
 
-      // подождать футер/социалки/JSON-LD
-      try {
-        await page.waitForSelector(
-          'footer a[href], [role="contentinfo"] a[href], [class*="social"] a[href]',
-          { timeout: 2500 }
-        );
-      } catch {}
-      try {
-        await page.waitForFunction(() => {
-          const q = (s) => document.querySelector(s);
-          const hasA =
-            q('a[href*="twitter.com"]') || q('a[href*="x.com"]') ||
-            q('a[href*="discord.gg"]') || q('a[href*="discord.com"]') ||
-            q('a[href*="t.me"]') || q('a[href*="telegram.me"]') ||
-            q('a[href*="github.com"]') || q('a[href*="medium.com"]') ||
-            q('a[href*="youtube.com"]') || q('a[href*="youtu.be"]') ||
-            q('a[href*="linkedin.com"]') || q('a[href*="lnkd.in"]') ||
-            q('a[href*="reddit.com"]');
-          const hasLd = !!document.querySelector('script[type="application/ld+json"]');
-          return hasA || hasLd;
-        }, { timeout: 7000 });
-      } catch {}
-
-      // скрин по запросу
+      // снимок по запросу
       if (screenshot) {
         try { await page.screenshot({ path: screenshot, fullPage: true }); } catch {}
       }
@@ -292,140 +268,19 @@ async function browserFetch(opts) {
       try { status = resp ? (typeof resp.status === 'function' ? resp.status() : 0) : 0; } catch {}
       const ok = true;
 
-      // извлекаем соц-ссылки
-      const socials = await page.evaluate((base) => {
-        const rxTwitter = /twitter\.com|x\.com/i;
-        const patterns = {
-          twitter: rxTwitter,
-          discord: /discord\.gg|discord\.com/i,
-          telegram: /t\.me|telegram\.me/i,
-          youtube: /youtube\.com|youtu\.be/i,
-          linkedin: /linkedin\.com|lnkd\.in/i,
-          reddit: /reddit\.com/i,
-          medium: /medium\.com/i,
-          github: /github\.com/i,
-        };
-
-        const toAbs = (href) => {
-          try {
-            if (!href) return '';
-            if (href.startsWith('//')) return location.protocol + href;
-            return href.startsWith('http') ? href : new URL(href, base).href;
-          } catch { return href || ''; }
-        };
-
-        const unwrapRedirect = (href) => {
-          try {
-            const u = new URL(href, base);
-            const p = u.pathname || '';
-            if (/^\/(out|redirect|external|go|away|r|link|jump)($|[\/?])/i.test(p)) {
-              const keys = ['url','u','to','target','redirect','redirect_uri','dest','destination','link'];
-              for (const k of keys) {
-                const v = u.searchParams.get(k);
-                if (v) return v;
-              }
-            }
-            return href;
-          } catch { return href; }
-        };
-
-        const acc = Object.fromEntries(Object.keys(patterns).map(k => [k, '']));
-        const twitterAll = new Set();
-
-        document.querySelectorAll('a[href]').forEach(a => {
-          const raw = (a.getAttribute('href') || '').trim();
-          if (!raw || raw === '#' || raw.startsWith('#')) return;
-          if (raw.startsWith('javascript:') || raw.startsWith('mailto:') || raw.startsWith('tel:')) return;
-
-          const rel = (a.getAttribute('rel') || '').toLowerCase();
-          const aria = (a.getAttribute('aria-label') || '').toLowerCase();
-          const title = (a.getAttribute('title') || '').toLowerCase();
-          const text  = (a.textContent || '').toLowerCase();
-
-          let href = toAbs(unwrapRedirect(raw));
-
-          const candAttrs = [
-            a.getAttribute('data-href'),
-            a.getAttribute('data-url'),
-            a.getAttribute('data-target'),
-            a.getAttribute('data-link'),
-          ].filter(Boolean);
-
-          let onclick = a.getAttribute('onclick') || '';
-          if (onclick && /https?:\/\//i.test(onclick)) {
-            try {
-              const m = onclick.match(/https?:\/\/[^\s"'()]+/ig);
-              if (m && m.length) candAttrs.push(...m);
-            } catch {}
-          }
-
-          for (let c of candAttrs) {
-            try {
-              c = toAbs(unwrapRedirect(String(c)));
-              if (!patterns.discord.test(href) && patterns.discord.test(c)) href = c;
-              if (!rxTwitter.test(href) && rxTwitter.test(c)) href = c;
-            } catch {}
-          }
-
-          if (!patterns.discord.test(href) && /(^|\b)discord\b/i.test(raw)) {
-            href = toAbs(raw);
-          }
-
-          if (!acc.discord && !patterns.discord.test(href) &&
-              (text.includes('discord') || aria.includes('discord') || title.includes('discord'))) {
-            acc.discord = href;
-          }
-
-          for (const [key, rx] of Object.entries(patterns)) {
-            if (!acc[key] && (rx.test(href) || rx.test(rel) || rx.test(aria) || rx.test(title))) {
-              acc[key] = href;
-            }
-          }
-          if (rxTwitter.test(href)) twitterAll.add(href);
-        });
-
-        // JSON-LD sameAs
-        try {
-          const scripts = Array.from(document.querySelectorAll('script[type="application/ld+json"]'));
-          for (const s of scripts) {
-            let data = null;
-            try { data = JSON.parse(s.textContent || '{}'); } catch {}
-            const items = Array.isArray(data) ? data : (data ? [data] : []);
-            for (const it of items) {
-              const same = it && (it.sameAs || it.sameas || it.SameAs);
-              const arr = Array.isArray(same) ? same : (typeof same === 'string' ? [same] : []);
-              for (let href of arr) {
-                if (typeof href !== 'string') continue;
-                href = toAbs(unwrapRedirect(href));
-                if (!acc.twitter && /twitter\.com|x\.com/i.test(href)) acc.twitter = href;
-                else if (!acc.discord && /discord\.(gg|com)/i.test(href)) acc.discord = href;
-                else if (!acc.telegram && /(t\.me|telegram\.me)/i.test(href)) acc.telegram = href;
-                else if (!acc.youtube && /(youtube\.com|youtu\.be)/i.test(href)) acc.youtube = href;
-                else if (!acc.linkedin && /(linkedin\.com|lnkd\.in)/i.test(href)) acc.linkedin = href;
-                else if (!acc.reddit && /reddit\.com/i.test(href)) acc.reddit = href;
-                else if (!acc.medium && /medium\.com/i.test(href)) acc.medium = href;
-                else if (!acc.github && /github\.com/i.test(href)) acc.github = href;
-                if (/twitter\.com|x\.com/i.test(href)) twitterAll.add(href);
-              }
-            }
-          }
-        } catch {}
-
-        return { ...acc, twitter_all: Array.from(twitterAll) };
-      }, url);
-
-      // HTML/TEXT по запросу
+      // возврат HTML/TEXT по запросу
       let bodyHtml = null;
       let bodyText = null;
-      if (html || opts.socials) {
+      if (html || opts?.socials) {
         try { bodyHtml = await page.content(); } catch {}
       }
-      if (text || (!html && !opts.socials)) {
+      if (text || (!html && !opts?.socials)) {
         try { bodyText = await page.evaluate(() => document.body?.innerText || ''); } catch {}
       }
 
       const title = await page.title().catch(() => '');
 
+      // проксируем заголовки ответа
       const headersObj = {};
       if (resp) {
         try {
@@ -439,7 +294,7 @@ async function browserFetch(opts) {
       const antiBot = await detectAntiBot(page, resp);
       const timing = { startedAt, finishedAt: Date.now(), ms: Date.now() - startedAt };
 
-      // X-профиль (опционально)
+      // X-профиль (опционально) - чисто извлечение из DOM страницы X, без нормализаций
       let twitter_profile = null;
       if (twitterProfile && /^https?:\/\/(?:www\.)?(?:x\.com|twitter\.com)\/[A-Za-z0-9_]{1,15}(?:[\/?#].*)?$/i.test(finalUrl)) {
         twitter_profile = await page.evaluate(() => {
@@ -470,7 +325,7 @@ async function browserFetch(opts) {
             }
           }
 
-          // links из BIO и UserUrl (под шапкой)
+          // ссылки из bio и блока UserUrl (под шапкой)
           const entries = [];
           document.querySelectorAll('div[data-testid="UserDescription"] a[href], div[data-testid="UserProfileHeader_Items"] a[href]').forEach(a => {
             const href = (a.getAttribute('href') || '').trim();
@@ -481,11 +336,9 @@ async function browserFetch(opts) {
 
           const abs = (h) => { try { return h && h.startsWith('http') ? h : new URL(h, location.href).href; } catch { return h; } };
 
-          // Если href = t.co и нет expanded - пробуем восстановить по видимому тексту (например "staderlabs.com" или "linktr.ee/xpla_official")
           function textToUrlMaybe(s) {
             const t = (s || '').trim();
             if (!t) return '';
-            // домен или домен/путь
             if (/^[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?:\/[^\s]*)?$/.test(t)) {
               return t.startsWith('http') ? t : 'https://' + t;
             }
@@ -493,11 +346,9 @@ async function browserFetch(opts) {
           }
 
           const links = Array.from(new Set(entries.map(e => {
-            // приоритет: expanded от t.co
             if (/^https?:\/\/t\.co\//i.test(e.href) && e.expanded) {
               return abs(e.expanded);
             }
-            // если expanded нет - пытаемся понять по видимому тексту ссылки
             if (/^https?:\/\/t\.co\//i.test(e.href)) {
               const guess = textToUrlMaybe(e.text);
               if (guess) return abs(guess);
@@ -541,6 +392,7 @@ async function browserFetch(opts) {
         });
       }
 
+      // возвращаем сырье: дальше Python разбирает доменную логику (соцсети, JSON-LD и т.п.)
       return {
         ok, status, url, finalUrl, title,
         html: bodyHtml, text: bodyText,
@@ -548,7 +400,6 @@ async function browserFetch(opts) {
         console: consoleLogs, timing, antiBot,
         website: url,
         ...(twitter_profile ? { twitter_profile } : {}),
-        ...socials,
       };
     } finally {
       // всегда закрываем

@@ -345,25 +345,7 @@ def fetch_profile_html(handle: str) -> tuple[str, str]:
             ):
                 _ban(base)
 
-    # если Nitter выключен или все инстансы исчерпаны
-    x_url = f"https://x.com/{handle}"
-    html, status, kind = _run_browser_fetch(x_url, max(_TIMEOUT * 2, 15))
-
-    avatar_raw, avatar_norm, links = _probe_profile(html, "https://x.com", handle)
-    logger.info(
-        "Nitter GET+parse: %s/%s → avatar=%s, links=%d",
-        "https://x.com",
-        handle,
-        "yes" if (avatar_raw or avatar_norm) else "no",
-        len(links),
-    )
-    if avatar_raw:
-        logger.info("Avatar URL: %s", force_https(avatar_raw))
-
-    if html and _html_matches_handle(html, handle) and not _looks_antibot(html):
-        logger.info("Nitter fallback -> direct X via Playwright: %s", x_url)
-        return html, "https://x.com"
-
+    # все кандидаты Nitter исчерпаны или невалидны → отдаем пусто
     return "", ""
 
 
