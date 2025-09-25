@@ -527,19 +527,27 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
     # попытка распарсить как JSON (браузерный ответ)
     try:
         j = json.loads(html or "")
-        if (
-            isinstance(j, dict)
-            and ("html" in j or "text" in j)
-            and not j.get("website")
-        ):
-            html = j.get("html") or j.get("text") or ""
+        if isinstance(j, dict):
+            # есть ли в JSON хотя бы один непустой соц-ключ (кроме служебных)?
+            _nonempty_social = any(
+                (k in j) and bool(j[k])
+                for k in _SOCIAL_KEYS
+                if k not in ("website", "document", "twitter_all")
+            )
 
-        elif isinstance(j, dict) and j.get("website"):
-            allowed = set(_SOCIAL_KEYS) | {"twitter_all"}
-            j_clean: dict = {}
-            for k, v in j.items():
-                if k in allowed and isinstance(v, (str, list)):
-                    j_clean[k] = v
+            # если это сырой браузерный ответ (html/text) или JSON без соц-ключей - разбираем как обычный HTML
+            if ("html" in j or "text" in j) and (
+                not j.get("website") or not _nonempty_social
+            ):
+                html = j.get("html") or j.get("text") or ""
+
+            # если это уже нормализованный JSON с соц-ключами - принимаем как финальный результат
+            elif j.get("website") and _nonempty_social:
+                allowed = set(_SOCIAL_KEYS) | {"twitter_all"}
+                j_clean: dict = {}
+                for k, v in j.items():
+                    if k in allowed and isinstance(v, (str, list)):
+                        j_clean[k] = v
 
             for k, v in list(j_clean.items()):
                 if isinstance(v, str) and v:
@@ -775,8 +783,15 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
             j2 = {}
 
         if isinstance(j2, dict) and j2.get("website"):
-            allowed = set(_SOCIAL_KEYS) | {"twitter_all"}
-            j2 = {k: v for k, v in j2.items() if k in allowed}
+            # есть ли в j2 хоть один соц-ключ?
+            _nonempty_social2 = any(
+                (k in j2) and bool(j2[k])
+                for k in _SOCIAL_KEYS
+                if k not in ("website", "document", "twitter_all")
+            )
+            if _nonempty_social2:
+                allowed = set(_SOCIAL_KEYS) | {"twitter_all"}
+                j2 = {k: v for k, v in j2.items() if k in allowed}
 
             for k, v in list(j2.items()):
                 if isinstance(v, str) and v:
