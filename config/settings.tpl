@@ -1,4 +1,4 @@
-clear_logs: true   # или false
+clear_logs: true   # true/false
 
 images:
   postgres: "postgres:17.6"
@@ -70,17 +70,17 @@ crm:
       #  funding:    201494
 
     safe_mode:
-      dry_run: true          # только заметка
-      no_overwrite: true     # не затирать уже заполненные поля
+      dry_run: true           # только заметка
+      no_overwrite: true      # не затирать уже заполненные поля
 
 modes:
   research_and_intake:        # Режим 1
-    enabled: false
+    enabled: false            # true/false
     tag_create: ["bot","new"]
     limit: 100                
     rate_limit_sec: 0.2       # троттлинг между сайтами
   enrich_existing:            # Режим 2
-    enabled: true
+    enabled: true             # true/false
     tag_id: [157965]        
     tag_process: ["new"]      # fallback для резолва ID
     page_size: 250            # размер страницы API Kommo
@@ -89,15 +89,15 @@ modes:
 
 parser:
   http:
-    strategy: "round_robin"  # "round_robin" | "random" | "single"
+    strategy: "round_robin"  # round_robin/random | "single"
     ua:
       - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
       - "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
       - "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
       - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
   nitter:
-    enabled: false
-    strategy: "random"     # "random" или "round_robin"
+    enabled: true            # true/false
+    strategy: "random"       # random/round_robin
     instances: [
       "https://nitter.net",
       "https://xcancel.com",
@@ -108,9 +108,9 @@ parser:
       "https://nitter.privacyredirect.com",
       "https://nitter.kuuro.net"
     ]
-    timeout: 10            # таймаут (в сек)
-    bad_ttl: 600           # на сколько сек баним инстанс после неудачи
-    max_ins: 3             # сколько инстансов за один прогон
+    timeout: 15              # таймаут (в сек)
+    bad_ttl: 600             # на сколько сек баним инстанс после неудачи
+    max_ins: 4               # сколько инстансов за один прогон
 
 socials:
   keys:

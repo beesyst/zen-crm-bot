@@ -20,13 +20,96 @@
       ],
       "phone": [],
       "twitter": [],
-      "telegram": [],
+      "telegram": [
+        "https://t.me/staderlabssupport"
+      ],
       "discord": [],
       "linkedin": [],
       "website": [],
       "forms": []
     },
-    "people": []
+    "people": [
+      {
+        "name": "Support",
+        "position": "support",
+        "emails": [],
+        "phones": [],
+        "links": {
+          "website": "https://quickswap.exchange/#/analytics/v3/pair/0x5d0acfa39a0fca603147f1c14e53f46be76984bc",
+          "document": "",
+          "twitter": "",
+          "discord": "",
+          "telegram": "",
+          "youtube": "",
+          "linkedin": "",
+          "reddit": "",
+          "medium": "",
+          "github": "",
+          "twitter_all": ""
+        },
+        "notes": "sourced: linktr.ee"
+      },
+      {
+        "name": "Uniswap | USDC <> SD",
+        "position": "bizdev",
+        "emails": [],
+        "phones": [],
+        "links": {
+          "website": "https://info.uniswap.org/#/pools/0xc72abb13b6bdfa64770cb5b1f57bebd36a91a29e",
+          "document": "",
+          "twitter": "",
+          "discord": "",
+          "telegram": "",
+          "youtube": "",
+          "linkedin": "",
+          "reddit": "",
+          "medium": "",
+          "github": "",
+          "twitter_all": ""
+        },
+        "notes": "sourced: linktr.ee"
+      },
+      {
+        "name": "Community Sign Up",
+        "position": "community",
+        "emails": [],
+        "phones": [],
+        "links": {
+          "website": "https://forms.gle/2FGQALHnoZvXmNf77",
+          "document": "",
+          "twitter": "",
+          "discord": "",
+          "telegram": "",
+          "youtube": "",
+          "linkedin": "",
+          "reddit": "",
+          "medium": "",
+          "github": "",
+          "twitter_all": ""
+        },
+        "notes": "sourced: linktr.ee"
+      },
+      {
+        "name": "Support",
+        "position": "support",
+        "emails": [],
+        "phones": [],
+        "links": {
+          "website": "https://staderlabs-docs.s3.amazonaws.com/Stader_Litepaper.pdf",
+          "document": "",
+          "twitter": "",
+          "discord": "",
+          "telegram": "",
+          "youtube": "",
+          "linkedin": "",
+          "reddit": "",
+          "medium": "",
+          "github": "",
+          "twitter_all": ""
+        },
+        "notes": "sourced: linktr.ee"
+      }
+    ]
   },
   "svgLogo": "staderlabs.jpg"
 }

@@ -233,6 +233,76 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
         except Exception as e:
             logger.warning("Twitter verification error: %s", e)
 
+        # если агрегатор уже подтвержден (aggregator_url) — соберем контакты сразу
+        try:
+            if aggregator_url:
+                try:
+                    agg_contacts = (
+                        extract_contacts_from_aggregator(aggregator_url) or {}
+                    )
+                except Exception:
+                    agg_contacts = {}
+
+                # emails → support.email
+                if agg_contacts.get("emails"):
+                    main_data["contacts"]["support"]["email"] = list(
+                        dict.fromkeys(
+                            [
+                                *main_data["contacts"]["support"]["email"],
+                                *agg_contacts["emails"],
+                            ]
+                        )
+                    )
+
+                # канальные списки из агрегатора → support.<channel>
+                for ch_key in get_social_keys():
+                    vals = agg_contacts.get(ch_key) or []
+                    if not vals:
+                        continue
+                    main_data["contacts"]["support"].setdefault(ch_key, [])
+                    main_data["contacts"]["support"][ch_key] = list(
+                        dict.fromkeys(
+                            [*main_data["contacts"]["support"][ch_key], *vals]
+                        )
+                    )
+
+                # persons → contacts.people (конвертация и дедуп)
+                existing_people = list(main_data["contacts"].get("people") or [])
+                existing_index = {
+                    _person_key_for_dedup(p): p for p in existing_people if p
+                }
+                for p in agg_contacts.get("persons") or []:
+                    norm = _person_from_channels(p)
+                    k = _person_key_for_dedup(
+                        {
+                            "role": norm.get("position"),
+                            "links": norm.get("links"),
+                            "email": (norm.get("emails") or [None])[0],
+                        }
+                    )
+                    if k in existing_index:
+                        dst = existing_index[k]
+                        if norm.get("name") and not dst.get("name"):
+                            dst["name"] = norm["name"]
+                        if norm.get("position") and not dst.get("position"):
+                            dst["position"] = norm["position"]
+                        dst_emails = set(dst.get("emails") or [])
+                        for e in norm.get("emails") or []:
+                            if e and e not in dst_emails:
+                                dst_emails.add(e)
+                        dst["emails"] = list(dst_emails)
+                        dst_links = dst.get("links") or {}
+                        for lk, lv in (norm.get("links") or {}).items():
+                            if lv and not (dst_links.get(lk) or "").strip():
+                                dst_links[lk] = lv
+                        dst["links"] = dst_links
+                    else:
+                        existing_people.append(norm)
+                        existing_index[k] = norm
+                main_data["contacts"]["people"] = existing_people
+        except Exception as e:
+            logger.warning("Aggregator contacts merge (verified) failed: %s", e)
+
         try:
             # BIO/аватар X + возможный линк-агрегатор в bio
             bio = {}
@@ -289,103 +359,117 @@ def collect_main_data(website_url: str, main_template: dict, storage_path: str) 
                 ):
                     main_data["socialLinks"][key] = bio_url
 
-            # если агрегатор найден только в bio - проверяем и мержим соцсети/контакты
-            if (not aggregator_url) and aggregator_from_bio:
-                tw = main_data["socialLinks"].get("twitter", "")
-                m = re.match(
-                    r"^https?://(?:www\.)?x\.com/([A-Za-z0-9_]{1,15})/?$",
-                    (tw or "") + "/",
-                    re.I,
-                )
-                handle = m.group(1) if m else None
-                ok_belongs, verified_bits = verify_aggregator_belongs(
-                    aggregator_from_bio, site_domain, handle
-                )
-                if ok_belongs:
-                    # соцсети с агрегатора
-                    socials_from_agg = (
-                        extract_socials_from_aggregator(aggregator_from_bio) or {}
+            # если агрегатор найден в bio
+            if aggregator_from_bio:
+                if not aggregator_url:
+                    # подтвердим и используем его
+                    tw = main_data["socialLinks"].get("twitter", "")
+                    m = re.match(
+                        r"^https?://(?:www\.)?x\.com/([A-Za-z0-9_]{1,15})/?$",
+                        (tw or "") + "/",
+                        re.I,
                     )
-                    try:
-                        _twlog = _get_logger("twitter")
-                        _twlog.info(
-                            "Агрегатор обогащение %s: %s",
-                            aggregator_from_bio,
-                            {k: v for k, v in socials_from_agg.items() if v},
+                    handle = m.group(1) if m else None
+                    ok_belongs, verified_bits = verify_aggregator_belongs(
+                        aggregator_from_bio, site_domain, handle
+                    )
+                    if ok_belongs:
+                        aggregator_url = aggregator_from_bio
+                        # соцсети с агрегатора
+                        socials_from_agg = (
+                            extract_socials_from_aggregator(aggregator_url) or {}
                         )
-                    except Exception:
-                        pass
-                    for k, v in socials_from_agg.items():
-                        if k == "website" or not v:
-                            continue
-                        if (
-                            k in main_data["socialLinks"]
-                            and not main_data["socialLinks"][k]
-                        ):
-                            main_data["socialLinks"][k] = v
-
-                    # офсайт из агрегатора - заполняем если пусто
-                    if verified_bits.get("website") and not main_data[
-                        "socialLinks"
-                    ].get("website"):
-                        main_data["socialLinks"]["website"] = verified_bits["website"]
-
-                    # контакты (emails + persons) из агрегатора → support/people
-                    try:
-                        agg_contacts = (
-                            extract_contacts_from_aggregator(aggregator_from_bio) or {}
-                        )
-                    except Exception:
-                        agg_contacts = {}
-
-                    if agg_contacts.get("emails"):
-                        main_data["contacts"]["support"]["email"] = list(
-                            dict.fromkeys(
-                                [
-                                    *main_data["contacts"]["support"]["email"],
-                                    *agg_contacts["emails"],
-                                ]
+                        try:
+                            _twlog = _get_logger("twitter")
+                            _twlog.info(
+                                "Агрегатор обогащение %s: %s",
+                                aggregator_url,
+                                {k: v for k, v in socials_from_agg.items() if v},
                             )
+                        except Exception:
+                            pass
+                        for k, v in socials_from_agg.items():
+                            if k == "website" or not v:
+                                continue
+                            if (
+                                k in main_data["socialLinks"]
+                                and not main_data["socialLinks"][k]
+                            ):
+                                main_data["socialLinks"][k] = v
+
+                        # офсайт из агрегатора - заполняем если пусто
+                        if verified_bits.get("website") and not main_data[
+                            "socialLinks"
+                        ].get("website"):
+                            main_data["socialLinks"]["website"] = verified_bits[
+                                "website"
+                            ]
+
+                        # соберем контакты и замержим (тот же код, что и выше)
+                        try:
+                            agg_contacts = (
+                                extract_contacts_from_aggregator(aggregator_url) or {}
+                            )
+                        except Exception:
+                            agg_contacts = {}
+
+                        if agg_contacts.get("emails"):
+                            main_data["contacts"]["support"]["email"] = list(
+                                dict.fromkeys(
+                                    [
+                                        *main_data["contacts"]["support"]["email"],
+                                        *agg_contacts["emails"],
+                                    ]
+                                )
+                            )
+                        for ch_key in get_social_keys():
+                            vals = agg_contacts.get(ch_key) or []
+                            if not vals:
+                                continue
+                            main_data["contacts"]["support"].setdefault(ch_key, [])
+                            main_data["contacts"]["support"][ch_key] = list(
+                                dict.fromkeys(
+                                    [*main_data["contacts"]["support"][ch_key], *vals]
+                                )
+                            )
+
+                        existing_people = list(
+                            main_data["contacts"].get("people") or []
                         )
-
-                    # persons → contacts.people (конвертация и дедуп по конфиг-приоритету)
-                    existing_people = list(main_data["contacts"].get("people") or [])
-                    existing_index = {
-                        _person_key_for_dedup(p): p for p in existing_people if p
-                    }
-
-                    for p in agg_contacts.get("persons") or []:
-                        norm = _person_from_channels(p)
-                        k = _person_key_for_dedup(
-                            {
-                                "role": norm.get("position"),
-                                "links": norm.get("links"),
-                                "email": (norm.get("emails") or [None])[0],
-                            }
-                        )
-                        if k in existing_index:
-                            dst = existing_index[k]
-                            if norm.get("name") and not dst.get("name"):
-                                dst["name"] = norm["name"]
-                            if norm.get("position") and not dst.get("position"):
-                                dst["position"] = norm["position"]
-                            # emails merge
-                            dst_emails = set(dst.get("emails") or [])
-                            for e in norm.get("emails") or []:
-                                if e and e not in dst_emails:
-                                    dst_emails.add(e)
-                            dst["emails"] = list(dst_emails)
-                            # links merge
-                            dst_links = dst.get("links") or {}
-                            for lk, lv in (norm.get("links") or {}).items():
-                                if lv and not (dst_links.get(lk) or "").strip():
-                                    dst_links[lk] = lv
-                            dst["links"] = dst_links
-                        else:
-                            existing_people.append(norm)
-                            existing_index[k] = norm
-
-                    main_data["contacts"]["people"] = existing_people
+                        existing_index = {
+                            _person_key_for_dedup(p): p for p in existing_people if p
+                        }
+                        for p in agg_contacts.get("persons") or []:
+                            norm = _person_from_channels(p)
+                            k = _person_key_for_dedup(
+                                {
+                                    "role": norm.get("position"),
+                                    "links": norm.get("links"),
+                                    "email": (norm.get("emails") or [None])[0],
+                                }
+                            )
+                            if k in existing_index:
+                                dst = existing_index[k]
+                                if norm.get("name") and not dst.get("name"):
+                                    dst["name"] = norm["name"]
+                                if norm.get("position") and not dst.get("position"):
+                                    dst["position"] = norm["position"]
+                                dst_emails = set(dst.get("emails") or [])
+                                for e in norm.get("emails") or []:
+                                    if e and e not in dst_emails:
+                                        dst_emails.add(e)
+                                dst["emails"] = list(dst_emails)
+                                dst_links = dst.get("links") or {}
+                                for lk, lv in (norm.get("links") or {}).items():
+                                    if lv and not (dst_links.get(lk) or "").strip():
+                                        dst_links[lk] = lv
+                                dst["links"] = dst_links
+                            else:
+                                existing_people.append(norm)
+                                existing_index[k] = norm
+                        main_data["contacts"]["people"] = existing_people
+                else:
+                    pass
 
             # аватар из X → сохраняем в storage/<project>.jpg
             real_avatar = avatar_verified or (

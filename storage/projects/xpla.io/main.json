@@ -24,7 +24,48 @@
       "website": [],
       "forms": []
     },
-    "people": []
+    "people": [
+      {
+        "name": "Support",
+        "position": "support",
+        "emails": [],
+        "phones": [],
+        "links": {
+          "website": "https://docs.xpla.io/learn/learn/isae-3000-type-2",
+          "document": "",
+          "twitter": "",
+          "discord": "",
+          "telegram": "",
+          "youtube": "",
+          "linkedin": "",
+          "reddit": "",
+          "medium": "",
+          "github": "",
+          "twitter_all": ""
+        },
+        "notes": "sourced: linktr.ee"
+      },
+      {
+        "name": "Support",
+        "position": "support",
+        "emails": [],
+        "phones": [],
+        "links": {
+          "website": "https://docs.xpla.io",
+          "document": "",
+          "twitter": "",
+          "discord": "",
+          "telegram": "",
+          "youtube": "",
+          "linkedin": "",
+          "reddit": "",
+          "medium": "",
+          "github": "",
+          "twitter_all": ""
+        },
+        "notes": "sourced: linktr.ee"
+      }
+    ]
   },
   "svgLogo": "xpla.jpg"
 }

@@ -208,24 +208,35 @@ def extract_socials_from_aggregator(agg_url: str) -> dict:
 
 # Извлечь контакты (email, формы, люди) с агрегатора по картам ролей из конфига
 def extract_contacts_from_aggregator(agg_url: str) -> dict:
+    contact_log = get_logger("contact")
     html = _fetch_html(agg_url)
-    res = {"emails": [], "forms": [], "persons": []}
+    # добавляем канальные списки по ключам соцсетей из конфига
+    allowed_keys = set(get_social_keys())
+    res = {k: [] for k in allowed_keys}
+    res.update({"emails": [], "forms": [], "persons": []})
+
     if not html:
-        logger.info(
-            "Агрегатор контакты %s: %s",
+        # лог в стиле contact, чтобы линии были единообразны в host.log
+        contact_log.info(
+            "Контакты на %s: %s",
             agg_url,
-            {"emails": res.get("emails", []), "persons": res.get("persons", [])},
+            {
+                k: v
+                for k, v in {
+                    **{kk: res[kk] for kk in ("emails", "forms")},
+                    **{kk: res[kk] for kk in allowed_keys},
+                }.items()
+                if v
+            },
         )
         return res
 
     soup = BeautifulSoup(html, "html.parser")
     roles_map = get_contact_roles()
     host_map = get_social_host_map()
-    allowed_keys = set(get_social_keys())
 
     EMAIL_RX = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.I)
 
-    # определяем роль по токенам из конфига
     def _resolve_role(text_or_href: str) -> str:
         s = (text_or_href or "").lower()
         for role, tokens in roles_map.items():
@@ -233,17 +244,15 @@ def extract_contacts_from_aggregator(agg_url: str) -> dict:
                 return role
         return ""
 
-    # создаем запись о человеке с нормализованными каналами
     def _mk_person(name: str, role: str, **channels):
         person = {"name": name, "role": role, "source": _host(agg_url)}
         for k, v in channels.items():
-            if v:
-                url_norm = normalize_url(v)
-                if k == "twitter":
-                    url_norm = twitter_to_x(url_norm)
-                # пишем только разрешённые ключи
-                if k in allowed_keys:
-                    person[k] = url_norm
+            if v and k in allowed_keys:
+                person[k] = (
+                    twitter_to_x(normalize_url(v))
+                    if k == "twitter"
+                    else normalize_url(v)
+                )
         return person
 
     # email (mailto / текст)
@@ -271,56 +280,75 @@ def extract_contacts_from_aggregator(agg_url: str) -> dict:
                 return k
         return None
 
-    # персональные каналы по ролям
+    # общий парс ссылок: распознаем роль и раскладываем
     for a in soup.find_all("a", href=True):
         text = a.get_text(" ", strip=True) or ""
         href_abs = normalize_url(urljoin(agg_url, a["href"]))
+        if not href_abs or not href_abs.startswith("http"):
+            continue
         h = _host(href_abs)
         role = _resolve_role(text) or _resolve_role(href_abs)
-        if not role:
-            continue
-
-        # имя по умолчанию
-        name = "Support" if role == "support" else (text.strip() or role.title())
-
-        # определить ключ соцсети по host_map
         social_key = _host_to_key(h)
 
-        if social_key and social_key in allowed_keys:
-            # twitter → x.com
-            channel_url = (
-                twitter_to_x(href_abs) if social_key == "twitter" else href_abs
+        # если это "support/contact/help" и ссылка соцсети - кладем прямо в support.{ключ}
+        if role in (
+            "support",
+            "contact",
+            "help",
+            "customer",
+            "service",
+            "customer support",
+            "helpdesk",
+            "cs",
+        ):
+            if social_key and social_key in allowed_keys:
+                url_norm = (
+                    twitter_to_x(href_abs) if social_key == "twitter" else href_abs
+                )
+                res[social_key].append(url_norm)
+                continue
+            # если это не соцсеть, но похоже на форму/сайт поддержки - в forms/website
+            if re.search(
+                r"/(contact|support|help|customer|ticket|request)(?:/|$|\?)",
+                href_abs,
+                re.I,
+            ):
+                res["forms"].append(href_abs)
+                continue
+
+        # иначе - создаем персону (роль != support) или просто пропускаем
+        if social_key and social_key in allowed_keys and role:
+            person_name = (
+                "Support" if role == "support" else (text.strip() or role.title())
             )
-            res["persons"].append(_mk_person(name, role, **{social_key: channel_url}))
-        else:
-            # общий сайт/форма контакта
-            if href_abs.startswith("http"):
-                res["persons"].append(_mk_person(name, role, website=href_abs))
+            res["persons"].append(
+                _mk_person(person_name, role, **{social_key: href_abs})
+            )
+        elif role:
+            person_name = (
+                "Support" if role == "support" else (text.strip() or role.title())
+            )
+            res["persons"].append(_mk_person(person_name, role, website=href_abs))
 
-    # дедуп по (role, основной канал)
-    seen = set()
-    deduped = []
+    # дедуп: emails/forms и канальные списки по соцключам
+    res["emails"] = list(dict.fromkeys([e.lower() for e in res["emails"]]))
+    res["forms"] = list(dict.fromkeys(res["forms"]))
+    for k in allowed_keys:
+        res[k] = list(dict.fromkeys(res[k]))
 
-    def _key(p: dict) -> tuple[str, str]:
-        role = (p.get("role") or "").lower()
-        # приоритет основного канала: email → конфиг-ключи → website
-        main = p.get("email") or ""
-        if not main:
-            for k in get_social_keys():
-                if p.get(k):
-                    main = p.get(k)
-                    break
-        if not main:
-            main = p.get("website") or ""
-        return role, (main or "").lower()
-
-    for p in res["persons"]:
-        k = _key(p)
-        if k and k not in seen:
-            seen.add(k)
-            deduped.append(p)
-    res["persons"] = deduped
-
+    # финальный лог через [contact]
+    contact_log.info(
+        "Контакты на %s: %s",
+        agg_url,
+        {
+            k: v
+            for k, v in {
+                **{"emails": res["emails"], "forms": res["forms"]},
+                **{kk: res[kk] for kk in allowed_keys},
+            }.items()
+            if v
+        },
+    )
     return res
 
 
