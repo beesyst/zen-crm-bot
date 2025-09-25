@@ -22,6 +22,7 @@ logger = get_logger("web")
 # Глобальные кэши и константы
 _FETCHED_HTML_CACHE: dict[str, str] = {}
 _DOCS_LOGGED: set[str] = set()
+_ENRICH_LOGGED: set[str] = set()
 
 UA = get_http_ua()
 
@@ -510,8 +511,19 @@ def find_best_docs_link(soup: BeautifulSoup, base_url: str) -> str:
     return ""
 
 
-# Парс соцсетей и docs из HTML сайта (короткие ключи)
+# Парс соцсетей и docs из HTML сайта
 def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -> dict:
+    def _finalize(links: dict) -> dict:
+        key = (base_url or "").rstrip("/")
+        if key and key not in _ENRICH_LOGGED:
+            logger.info(
+                "Начальное обогащение %s: %s",
+                base_url,
+                {k: v for k, v in links.items() if v},
+            )
+            _ENRICH_LOGGED.add(key)
+        return links
+
     # попытка распарсить как JSON (браузерный ответ)
     try:
         j = json.loads(html or "")
@@ -605,7 +617,7 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
             if twitter_all:
                 links["twitter_all"] = list(dict.fromkeys(twitter_all))
 
-            return links
+            return _finalize(links)
     except Exception:
         pass
 
@@ -807,7 +819,7 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
                 if isinstance(v, str) and v:
                     links[k] = _abs_https(base_url, v)
 
-            return links
+            return _finalize(links)
 
         if isinstance(j2, dict) and ("html" in j2 or "text" in j2):
             html2 = j2.get("html") or j2.get("text") or ""
@@ -973,10 +985,7 @@ def extract_social_links(html: str, base_url: str, is_main_page: bool = False) -
     if twitter_all:
         links["twitter_all"] = list(dict.fromkeys(twitter_all))
 
-    logger.info(
-        "Начальное обогащение %s: %s", base_url, {k: v for k, v in links.items() if v}
-    )
-    return links
+    return _finalize(links)
 
 
 # Попытка определить имя проекта из HTML/мета/титула/твиттера
