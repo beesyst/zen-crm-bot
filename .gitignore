@@ -3,6 +3,7 @@
 env/
 venv/
 config/settings.yml
+config/apps/canton.yml
 core/node/node_modules/
 core/node/.ms-playwright/
 core/templates/settings.example.yml
