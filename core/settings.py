@@ -136,6 +136,67 @@ def get_nitter_cfg() -> dict:
     return out
 
 
+# Нормализатор конфига LinkedIn
+def get_linkedin_cfg() -> Dict[str, Any]:
+    s = get_settings() or {}
+    parser = s.get("parser") or {}
+    li = parser.get("linkedin") or {}
+
+    # базовый флаг
+    enabled = bool(li.get("enabled", False))
+
+    # аккаунт (только для полей)
+    account = li.get("account") or {}
+    out_account = {
+        "email": str(account.get("email") or "").strip(),
+        "useragent": str(account.get("useragent") or "").strip(),
+        "cookies_base64": str(account.get("cookies_base64") or "").strip(),
+        "totp_secret": str(account.get("totp_secret") or "").strip(),
+    }
+
+    # профили/файлы сессий (опционально, на будущее)
+    persistent_profile = str(li.get("persistent_profile") or "").strip()
+    cookies_path = str(li.get("cookies_path") or "").strip()
+
+    # лимиты/скролл
+    max_profiles = int(li.get("max_profiles") or 25)
+    scroll_pages = int(li.get("scroll_pages") or 2)
+
+    # роли-фильтры
+    role_filters = []
+    for x in li.get("role_filters") or []:
+        if isinstance(x, str) and x.strip():
+            role_filters.append(x.strip().lower())
+
+    # троттлинг
+    thrott = li.get("throttle")
+    if not isinstance(thrott, dict):
+        raise RuntimeError("config/settings.yml: parser.linkedin.throttle обязателен")
+
+    try:
+        throttle = {
+            "min_action": int(thrott["min_action"]),
+            "max_action": int(thrott["max_action"]),
+            "burst_actions": int(thrott["burst_actions"]),
+            "cool_down": int(thrott["cool_down"]),
+        }
+    except KeyError as e:
+        raise RuntimeError(
+            f"config/settings.yml: отсутствует ключ throttle.{e.args[0]}"
+        )
+
+    return {
+        "enabled": enabled,
+        "account": out_account,
+        "persistent_profile": persistent_profile,
+        "cookies_path": cookies_path,
+        "max_profiles": max_profiles,
+        "scroll_pages": scroll_pages,
+        "role_filters": role_filters,
+        "throttle": throttle,
+    }
+
+
 # Возвращает словарь ролей контактов (contacts.roles) с токенами
 def get_contact_roles() -> Dict[str, list[str]]:
     roles = ((get_settings().get("contacts") or {}).get("roles")) or {}

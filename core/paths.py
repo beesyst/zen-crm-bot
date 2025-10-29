@@ -19,6 +19,7 @@ LOG_PATHS = {
     "host": LOGS_DIR / "host.log",
     "setup": LOGS_DIR / "setup.log",
     "kommo": LOGS_DIR / "kommo.log",
+    "news": LOGS_DIR / "news.log",
 }
 
 

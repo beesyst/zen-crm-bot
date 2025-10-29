@@ -11,24 +11,38 @@
     "reddit": "https://www.reddit.com/r/StaderLabs_Official",
     "medium": "",
     "github": "https://github.com/stader-labs",
-    "twitter_all": ""
+    "twitter_all": "",
+    "phone": "",
+    "email": ""
   },
   "contacts": {
     "support": {
       "email": [
         "admin@staderlabs.com"
       ],
-      "phone": [],
-      "twitter": [],
+      "phone": "",
+      "twitter": "",
       "telegram": [
         "https://t.me/staderlabssupport"
       ],
-      "discord": [],
-      "linkedin": [],
-      "website": [],
-      "forms": []
+      "discord": "",
+      "linkedin": "",
+      "website": "",
+      "forms": ""
     },
     "people": [
+      {
+        "name": "",
+        "title": "",
+        "linkedin": "",
+        "email": [],
+        "phone": "",
+        "twitter": "",
+        "telegram": "",
+        "discord": "",
+        "website": "",
+        "github": ""
+      },
       {
         "name": "Support",
         "position": "support",

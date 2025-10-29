@@ -12,6 +12,7 @@ logs/
 note.txt
 !logs/.gitkeep
 storage/celery/
+storage/linkedin/
 storage/seed/state.json
 
 domain/__init__.py

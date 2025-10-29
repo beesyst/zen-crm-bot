@@ -504,6 +504,15 @@ def _run_modes_after_up():
             echo=True,
         )
 
+    # news (режим 3)
+    if settings.get("modes", {}).get("news_aggregator", {}).get("enabled", False):
+        HOST_LOGGER.info("compose run cli.news")
+        sh_log_host(
+            compose_cmd("run", "--rm", "job", "python", "-m", "cli.news"),
+            cwd=DOCKER_DIR,
+            echo=True,
+        )
+
 
 # Общий пайплайн
 def _pipeline_up(*, detached: bool, run_modes: bool) -> int:

@@ -1,0 +1,23 @@
+app: "Canton"
+project_key: "canton"
+
+sources:
+  slack:
+    enabled: true
+    api_base: "https://slack.com/api"        # <— вынесли сюда
+    bot_token: "xoxb-*** ПОДСТАВЬ СВОЙ ***"
+    channels: ["engineering", "announcements"]
+    thread_replies: true
+    oldest_days: 14
+  twitter:
+    enabled: false
+    via: "nitter"                             # nitter | playwright
+    handles: ["CantonHQ","CantonDev"]
+  rss:
+    enabled: false
+    feeds:
+      - "https://forum.canton.org/latest.rss"
+      - "https://blog.canton.org/rss.xml"
+
+tags: ["crypto","dev"]
+visibility_hint: "internal"                   # подсказка для бэка

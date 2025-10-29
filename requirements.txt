@@ -15,3 +15,4 @@ pyyaml
 python-dotenv
 python-json-logger
 python-multipart>=0.0.20
+pydantic>=2.12.3

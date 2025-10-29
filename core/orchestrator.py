@@ -9,16 +9,10 @@ from app.adapters.crm.kommo import KommoAdapter
 from domain.services.enrich import enrich_company_by_url
 from domain.services.seed import seed_company_from_url
 
-# Терминальные метки
 from core.console import add, error, finish, ok, skip, update
-
-# Единый файловый лог host.log
 from core.log_setup import get_logger
-
-# Нормализованное имя/токен из URL для логов
+from core.news.runner import run_news_once
 from core.normalize import brand_from_url
-
-# Путь к конфигам
 from core.paths import CONFIG_DIR
 
 # Логгер, который пишет в logs/host.log с меткой [orchestrator]
@@ -249,6 +243,14 @@ def run_enrich_pipeline(options: OrchestratorOptions | None = None) -> None:
     finish()
 
 
+# Пайплайн 3: News Aggregator
+def run_news_pipeline() -> None:
+    ok("start news")
+    res = run_news_once()
+    ok(f"total: {res.get('saved', 0) + res.get('skipped', 0)}")
+    finish()
+
+
 # Комбайнер по настройкам
 def run_enabled_pipelines(options: OrchestratorOptions | None = None) -> None:
     settings = _load_settings()
@@ -258,3 +260,6 @@ def run_enabled_pipelines(options: OrchestratorOptions | None = None) -> None:
 
     if settings.get("modes", {}).get("enrich_existing", {}).get("enabled", False):
         run_enrich_pipeline(options)
+
+    if settings.get("modes", {}).get("news_aggregator", {}).get("enabled", False):
+        run_news_pipeline()

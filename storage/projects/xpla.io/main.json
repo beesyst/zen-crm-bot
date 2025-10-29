@@ -11,20 +11,34 @@
     "reddit": "",
     "medium": "https://medium.com/xpla-ecosystem",
     "github": "https://github.com/xpladev",
-    "twitter_all": ""
+    "twitter_all": "",
+    "phone": "",
+    "email": ""
   },
   "contacts": {
     "support": {
-      "email": [],
-      "phone": [],
-      "twitter": [],
-      "telegram": [],
-      "discord": [],
-      "linkedin": [],
-      "website": [],
-      "forms": []
+      "email": "",
+      "phone": "",
+      "twitter": "",
+      "telegram": "",
+      "discord": "",
+      "linkedin": "",
+      "website": "",
+      "forms": ""
     },
     "people": [
+      {
+        "name": "",
+        "title": "",
+        "linkedin": "",
+        "email": [],
+        "phone": "",
+        "twitter": "",
+        "telegram": "",
+        "discord": "",
+        "website": "",
+        "github": ""
+      },
       {
         "name": "Support",
         "position": "support",

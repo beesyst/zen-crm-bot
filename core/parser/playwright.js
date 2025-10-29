@@ -36,6 +36,19 @@ function parseArgs(argv) {
       const csv = String(argv[++i] || '').trim();
       args.waitSocialHosts = csv ? csv.split(',').map(s => s.trim().toLowerCase()).filter(Boolean) : [];
     }
+    // proxy
+    else if (a === '--proxy') {
+      try { args.proxy = JSON.parse(argv[++i]); } catch { args.proxy = {}; }
+    }
+    else if (a === '--profile') {
+      args.profile = argv[++i];
+    }
+    else if (a === '--cookiesPath') {
+      args.cookiesPath = argv[++i];
+    }
+    else if (a === '--scrollPages') {
+      args.scrollPages = Math.max(1, Number(argv[++i]) || 1);
+    }
     // режим nitter (включает профильные селекторы)
     else if (a === '--nitter') {
       args.nitter = String(argv[++i] || '').toLowerCase() !== 'false';
@@ -205,20 +218,42 @@ async function browserFetch(opts) {
 
   const attempt = async () => {
     const startedAt = Date.now();
-    const browser = await chromium.launch({ headless: true, args: launchArgs });
-    let context;
+    const launchOpts = { headless: true, args: launchArgs };
+    if (opts && opts.proxy && Object.keys(opts.proxy).length) {
+      launchOpts.proxy = opts.proxy;
+    }
+
+    let browser, context;
     try {
-      // контекст с инжектированным отпечатком
-      context = await buildContextWithFingerprint(browser, {
-        targetUrl: url,
-        ua,
-        js,
-        headers,
-        fpDevice,
-        fpOS,
-        fpLocales,
-        fpViewport,
-      });
+      if (opts.profile) {
+        // persistent profile
+        const userDataDir = opts.profile;
+        const ctxOpts = { args: launchArgs };
+        if (opts.proxy && Object.keys(opts.proxy).length) {
+          ctxOpts.proxy = opts.proxy;
+        }
+        context = await chromium.launchPersistentContext(userDataDir, {
+          ...ctxOpts,
+          userAgent: ua || undefined,
+          javaScriptEnabled: js !== false,
+          ignoreHTTPSErrors: true,
+          bypassCSP: true,
+          viewport: { width: 1366, height: 768 },
+          extraHTTPHeaders: { ...headers, 'Accept-Language': 'en-US,en;q=0.9' },
+        });
+      } else {
+        browser = await chromium.launch(launchOpts);
+        context = await buildContextWithFingerprint(browser, {
+          targetUrl: url,
+          ua,
+          js,
+          headers,
+          fpDevice,
+          fpOS,
+          fpLocales,
+          fpViewport,
+        });
+      }
 
       // куки (если нужны)
       if (Array.isArray(cookies) && cookies.length) {
@@ -339,6 +374,14 @@ async function browserFetch(opts) {
       }
 
       const cookiesOut = await context.cookies().catch(() => []);
+      if (Array.isArray(cookiesOut) && opts.cookiesPath) {
+        try {
+          const fs = require("fs");
+          const path = require("path");
+          fs.mkdirSync(path.dirname(opts.cookiesPath), { recursive: true });
+          fs.writeFileSync(opts.cookiesPath, JSON.stringify(cookiesOut, null, 2));
+        } catch {}
+      }
       const antiBot = await detectAntiBot(page, resp);
       const timing = { startedAt, finishedAt: Date.now(), ms: Date.now() - startedAt };
 
@@ -450,9 +493,13 @@ async function browserFetch(opts) {
         ...(twitter_profile ? { twitter_profile } : {}),
       };
     } finally {
-      // всегда закрываем
-      try { await context?.browser()?.close?.(); } catch {}
-      try { await context?.close?.(); } catch {}
+      try {
+        if (browser) {
+          await browser.close();
+        } else if (context) {
+          await context.close();
+        }
+      } catch {}
     }
   };
 

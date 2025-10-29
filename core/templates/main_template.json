@@ -3,6 +3,8 @@
   "socialLinks": {
     "website": "",
     "document": "",
+    "phone": "",
+    "email": "",
     "twitter": "",
     "discord": "",
     "github": "",
@@ -15,15 +17,28 @@
   },
   "contacts": {
     "support": {
-      "email": [],
-      "phone": [],
-      "twitter": [],
-      "telegram": [],
-      "discord": [],
-      "linkedin": [],
-      "website": [],
-      "forms": []
+      "email": "",
+      "phone": "",
+      "twitter": "",
+      "telegram": "",
+      "discord": "",
+      "linkedin": "",
+      "website": "",
+      "forms": ""
     },
-    "people": []
+    "people": [
+      {
+        "name": "",
+        "title": "",
+        "linkedin": "",
+        "email": [],
+        "phone": "",
+        "twitter": "",
+        "telegram": "",
+        "discord": "",
+        "website": "",
+        "github": ""
+      }
+    ]
   }
 }

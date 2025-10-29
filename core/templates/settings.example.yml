@@ -33,10 +33,8 @@ crm:
     github: 1114007, linkedin: 1113201, medium: 1113983, phone: null, reddit: 1113195,
     telegram: 1113197, twitter: 1113199, website: 195000, youtube: 1113193}}
     safe_mode:
-      dry_run: true
-...
-      no_overwrite: true
-...
+      dry_run: False
+      no_overwrite: True
 
 modes:
   research_and_intake:
@@ -44,7 +42,7 @@ modes:
 ...
     tag_create: [bot, new]
   enrich_existing:
-    enabled: true
+    enabled: false
 ...
     tag_process: [new]
 
