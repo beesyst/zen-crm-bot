@@ -84,6 +84,8 @@ def _html_matches_handle(html: str, handle: str) -> bool:
 # Утилита: эвристика антибота/пустышки: слишком короткий HTML или типичные фразы
 def _looks_antibot(text: str) -> bool:
     low = (text or "").lower()
+    if "tweet-body" in low or "timeline-item" in low:
+        return False
     needles = (
         "captcha",
         "verify",
@@ -91,6 +93,8 @@ def _looks_antibot(text: str) -> bool:
         "access denied",
         "rate limit",
         "please enable javascript",
+        "just a moment",
+        "checking your browser",
     )
     return any(s in low for s in needles) or len(low) < 400
 
@@ -104,11 +108,11 @@ def _run_playwright(url: str, timeout_sec: int) -> tuple[str, int, str]:
         "--url",
         url,
         "--wait",
-        "domcontentloaded",
+        "networkidle",
         "--timeout",
         str(int(max(1, timeout_sec) * 1000)),
         "--retries",
-        "0",
+        "1",
         "--ua",
         UA,
         "--raw",
@@ -121,7 +125,7 @@ def _run_playwright(url: str, timeout_sec: int) -> tuple[str, int, str]:
             cwd=os.path.dirname(script),
             capture_output=True,
             text=True,
-            timeout=max(timeout_sec + 5, 15),
+            timeout=max(timeout_sec + 10, 25),
         )
     except Exception as e:
         logger.debug("playwright run error for %s: %s", url, e)
@@ -150,7 +154,6 @@ def _probe_profile(
         return "", "", []
     soup = BeautifulSoup(html, "html.parser")
 
-    # ссылки (как в parse_profile, но укороченно)
     base = f"{force_https(inst_base).rstrip('/')}/{handle}"
     links, seen = set(), set()
     for sel in (
@@ -178,7 +181,6 @@ def _probe_profile(
                 links.add(u)
                 seen.add(u)
 
-    # аватар (как в _pick_avatar_from_soup)
     avatar_raw, avatar_norm = _pick_avatar_from_soup(soup, inst_base)
     avatar_norm = _normalize_avatar(avatar_norm or "")
 
@@ -202,7 +204,6 @@ def _sample_instances_unique(max_count: int) -> list[str]:
         _RR_COUNTER["idx"] = (start + len(out)) % n
         return out
 
-    # default/random
     pool = alive[:]
     random.shuffle(pool)
     return pool[: min(max_count, len(pool))]
@@ -305,12 +306,11 @@ def _pick_avatar_from_soup(soup: BeautifulSoup, inst_base: str) -> tuple[str, st
     return "", ""
 
 
-# Получение HTML профиля через Nitter: только Playwright, 1 попытка на инстанс
-def fetch_profile_html(handle: str) -> tuple[str, str]:
+# Получение HTML профиля через Nitter
+def fetch_profile_html(handle: str, probe_log: bool = True) -> tuple[str, str]:
     if not handle:
         return "", ""
 
-    # если Nitter включен и есть инстансы - пытаемся их
     if _ENABLED and _INSTANCES:
         candidates = _sample_instances_unique(max(1, _MAX_INS))
         for inst in candidates:
@@ -322,32 +322,41 @@ def fetch_profile_html(handle: str) -> tuple[str, str]:
             url = f"{base}/{handle}"
             html, status, kind = _run_playwright(url, _TIMEOUT)
 
-            avatar_raw, avatar_norm, links = _probe_profile(html, base, handle)
-            logger.info(
-                "Nitter GET+parse: %s/%s → avatar=%s, links=%d",
-                base,
-                handle,
-                "yes" if (avatar_raw or avatar_norm) else "no",
-                len(links),
-            )
-            if avatar_raw:
-                logger.info("Avatar URL: %s", force_https(avatar_raw))
-            if links:
-                logger.info("BIO из Nitter: %s", links)
+            # лог для режима 2
+            if probe_log:
+                avatar_raw, avatar_norm, links = _probe_profile(html, base, handle)
+                try:
+                    logger.info(
+                        "Nitter GET+parse: %s/%s → avatar=%s, links=%d",
+                        base,
+                        handle,
+                        "yes" if (avatar_raw or avatar_norm) else "no",
+                        len(links),
+                    )
+                    if avatar_raw or avatar_norm:
+                        logger.info(
+                            "Avatar URL: %s", force_https(avatar_raw or avatar_norm)
+                        )
+                    if links:
+                        logger.info("BIO из Nitter: %s", list(links))
+                except Exception:
+                    pass
 
+            # валидация HTML профиля
             if html and _html_matches_handle(html, handle) and not _looks_antibot(html):
                 _NITTER_HTML_CACHE[cache_key] = (html, base)
                 return html, base
 
+            # баним проблемные инстансы
             if (
                 kind
                 or status in (0, 403, 429, 503)
                 or _looks_antibot(html)
                 or (status == 200 and not _html_matches_handle(html, handle))
+                or not html
             ):
                 _ban(base)
 
-    # все кандидаты Nitter исчерпаны или невалидны → отдаем пусто
     return "", ""
 
 
@@ -447,3 +456,90 @@ def parse_profile(url_or_handle: str) -> dict:
         "avatar_raw": force_https(avatar_raw or ""),
         "name": name,
     }
+
+
+# Извлечение твитов из HTML профиля Nitter
+def _extract_tweet_items(soup, inst_base, handle, limit: int) -> list[dict]:
+    items = []
+    # поддерживаем обе разметки: article.timeline-item ИЛИ div.tweet-body
+    for art in soup.select("article.timeline-item, div.tweet-body")[: max(1, limit)]:
+        try:
+            # id/URL
+            a_date = art.select_one(".tweet-date a[href]")
+            href = a_date.get("href").strip() if a_date else ""
+            m = re.search(r"/status/(\d+)", href or "", re.I)
+            tw_id = m.group(1) if m else ""
+            status_url = f"https://x.com/{handle}/status/{tw_id}" if tw_id else ""
+
+            # дата
+            t = art.select_one(".tweet-date time[datetime]")
+            dt = (t.get("datetime") or "").strip() if t else ""
+
+            # текст (учитываем оба варианта классов)
+            text_el = art.select_one(".tweet-content, .tweet-content.media-body")
+            text = text_el.get_text(" ", strip=True) if text_el else ""
+            title = (text[:117] + "…") if len(text) > 120 else text
+
+            # медиа
+            media = []
+            for img in art.select("a.attachments img[src], div.attachment img[src]"):
+                src = (img.get("src") or "").strip()
+                if src:
+                    media.append(_decode_nitter_pic_url(src))
+            media = list(dict.fromkeys(media))
+
+            items.append(
+                {
+                    "id": tw_id,
+                    "status_url": status_url,
+                    "handle": handle,
+                    "datetime": dt,
+                    "text": text,
+                    "title": title,
+                    "media": media,
+                }
+            )
+        except Exception:
+            continue
+    return items
+
+
+def parse_tweets_from_html(
+    html: str, inst_base: str, handle: str, limit: int = 5
+) -> list[dict]:
+    if not html:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    return _extract_tweet_items(soup, inst_base, handle, limit)
+
+
+# Загрузка HTML профиля через Nitter/Playwright и парсинг последних твитов
+def fetch_tweets(
+    handle: str, limit: int = 5, oldest_days: int | None = None
+) -> list[dict]:
+    html, inst = fetch_profile_html(handle, probe_log=False)
+    items: list[dict] = []
+
+    if html and inst:
+        # берем avatar/links из того же HTML, чтобы собрать единый лог
+        avatar_raw, avatar_norm, links = _probe_profile(html, inst, handle)
+        soup = BeautifulSoup(html, "html.parser")
+        items = _extract_tweet_items(soup, inst, handle, limit=limit)
+
+        try:
+            logger.info(
+                "Nitter GET+parse: %s/%s → avatar=%s, links=%d, tweets=%d",
+                (inst or "").rstrip("/"),
+                handle,
+                "yes" if (avatar_raw or avatar_norm) else "no",
+                len(links or []),
+                len(items or []),
+            )
+            if avatar_raw or avatar_norm:
+                logger.info("Avatar URL: %s", force_https(avatar_raw or avatar_norm))
+            if links:
+                logger.info("BIO из Nitter: %s", list(links))
+        except Exception:
+            pass
+
+    return items or []

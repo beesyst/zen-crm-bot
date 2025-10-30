@@ -140,7 +140,8 @@ def setup_logging(
             fh.addFilter(ctx_filter)
             fh.setLevel(root.level)
 
-            for name in ("host", "orchestrator"):
+            # пишем в host.log
+            for name in ("host", "orchestrator", "news", "nitter", "twitter"):
                 lg = logging.getLogger(name)
                 lg.setLevel(root.level)
                 lg.propagate = False

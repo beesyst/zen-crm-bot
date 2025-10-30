@@ -16,7 +16,7 @@ from core.storage import save_news_item
 log = get_logger("news")
 
 
-# Конфиг-структура для режима news_aggregator
+# Конфиг-структура для режима news_aggregator (частично дублирует settings.yml)
 @dataclass
 class NewsModeConfig:
     enabled: bool = False
@@ -30,16 +30,20 @@ class NewsModeConfig:
     schedule_rss: int = 600
 
 
-# Ф-ция: загрузить config/settings.yml
+# Загрузка config/settings.yml
 def _load_settings() -> dict:
     p = CONFIG_DIR / "settings.yml"
     if not p.exists():
         log.warning("settings.yml not found at %s", p)
         return {}
-    return yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    try:
+        return yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except Exception:
+        log.exception("settings.yml parse error at %s", p)
+        return {}
 
 
-# Ф-ция: распарсить ветку modes.news_aggregator в NewsModeConfig
+# Разбор modes.news_aggregator в NewsModeConfig
 def _parse_news_mode(settings: dict) -> NewsModeConfig:
     md = (settings.get("modes") or {}).get("news_aggregator") or {}
     sched = md.get("schedule") or {}
@@ -57,7 +61,7 @@ def _parse_news_mode(settings: dict) -> NewsModeConfig:
     )
 
 
-# Ф-ция: обойти все *.yml в config/apps и выдавать (project_key, cfg, path)
+# Итерация по *.yml в config/apps → (project_key, cfg, path)
 def _iter_project_configs(projects_dir: Path) -> Iterable[Tuple[str, dict, Path]]:
     if not projects_dir.exists():
         log.warning("projects_dir does not exist: %s", projects_dir)
@@ -72,45 +76,41 @@ def _iter_project_configs(projects_dir: Path) -> Iterable[Tuple[str, dict, Path]
             log.exception("Bad project config: %s", yml)
 
 
-# Ф-ция: подцепить модуль адаптера и вызвать его pull()/fetch()/iter_items()/run()
-def _call_adapter_pull(
-    mod_path: str, project_key: str, app_cfg: dict
-) -> Iterable[dict]:
+# Универсальный вызов адаптера: app.adapters.news.<name>.(pull|fetch|iter_items|run)
+def _call_adapter_pull(mod_path: str, project_key: str, app_cfg: dict) -> List[dict]:
     try:
         mod = importlib.import_module(mod_path)
     except Exception as e:
-        log.error("Import adapter failed: %s (%s)", mod_path, e)
+        log.debug("Import adapter failed: %s (%s)", mod_path, e)
         return []
-
     for fn_name in ("pull", "fetch", "iter_items", "run"):
         fn = getattr(mod, fn_name, None)
         if callable(fn):
             try:
                 res = fn(project_key, app_cfg)
-                return res or []
+                return list(res or [])
             except Exception:
                 log.exception("Adapter '%s.%s' crashed", mod_path, fn_name)
                 return []
-    log.error("Adapter %s has no suitable callable", mod_path)
+    log.debug("Adapter %s has no suitable callable", mod_path)
     return []
 
 
-# Ф-ция: минимально подготовить «сырой» элемент (url/ts/id/source/project_key)
+# Предочистка "сырого" элемента от источника (url/ts/id/source/project_key)
 def _normalize_source_item(raw: dict, project_key: str, source: str) -> Optional[dict]:
     if not isinstance(raw, dict):
         return None
-
     item = dict(raw)
 
-    # URL: легкая гигиена на стороне раннера (финальную чистку сделает schema)
-    u = item.get("url") or item.get("link") or ""
+    # URL: легкая гигиена
+    u = item.get("url") or item.get("link") or item.get("source_url") or ""
     if u:
         u = normalize_url(u)
         if u:
             u = _strip_tracking_params(u)
         item["url"] = u or None
 
-    # время: если прилетел unix (int/float) - конвертнем в ISO; schema сама распарсит
+    # Время: unix → ISO, иначе оставляем строку как есть
     ts = item.get("ts") or item.get("timestamp")
     if isinstance(ts, (int, float)):
         item["ts"] = datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
@@ -119,30 +119,30 @@ def _normalize_source_item(raw: dict, project_key: str, source: str) -> Optional
     else:
         item.pop("ts", None)
 
-    # идент-р: детерминированный, если не задан
+    # Детерминированный id, если не задан
     if not item.get("id"):
         base = f"{project_key}:{source}:{item.get('channel') or ''}:{item.get('url') or item.get('title') or ''}"
         item["id"] = str(abs(hash(base)))
 
-    # источник/проект: проставляем жестко
+    # Источник/проект
     item["source"] = source
     item["project_key"] = project_key
 
     return item
 
 
-# Ф-ция: применить схему (Pydantic) → строгий dict (ts уже ISO, url очищен)
+# Применение строгой схемы (если есть core.news.schema)
 def _apply_schema(item: dict) -> dict:
     try:
         from core.news import schema as news_schema
 
         return news_schema.shape_item(item)
     except Exception:
-        # пропустим (но лучше смотреть logs/news.log)
+        # если схемы нет/упала — возвращаем как есть (сигнал в логи)
         return item
 
 
-# Ф-ция: собрать Slack-новости для проекта
+# Slack: через адаптер (если есть), иначе пусто
 def _pull_slack(project_key: str, app_cfg: dict) -> List[dict]:
     src_cfg = (app_cfg.get("sources") or {}).get("slack") or {}
     if not src_cfg.get("enabled", False):
@@ -156,32 +156,71 @@ def _pull_slack(project_key: str, app_cfg: dict) -> List[dict]:
     return out
 
 
-# Ф-ция: собрать X-новости
+# X(Twitter): сначала пробуем адаптер, если пусто/нет — fallback на core.parser.twitter.get_recent_tweets
 def _pull_twitter(project_key: str, app_cfg: dict) -> List[dict]:
     src_cfg = (app_cfg.get("sources") or {}).get("twitter") or {}
     if not src_cfg.get("enabled", False):
         return []
+
+    # 1) Попытка через внешний адаптер
+    items = _call_adapter_pull("app.adapters.news.twitter", project_key, app_cfg)
+    if items:
+        out: List[dict] = []
+        for raw in items:
+            norm = _normalize_source_item(raw, project_key, "twitter")
+            if norm:
+                out.append(_apply_schema(norm))
+        return out
+
+    # 2) Fallback: напрямую через парсер (твои новые функции)
     try:
-        items = _call_adapter_pull("app.adapters.news.twitter", project_key, app_cfg)
+        from core.parser.twitter import get_recent_tweets
     except Exception:
-        items = []
+        log.exception("core.parser.twitter import failed")
+        return []
+
+    handles = list(src_cfg.get("handles") or [])
+    handle_limit = int(src_cfg.get("handle_limit") or 5)
+    oldest_days = int(src_cfg.get("oldest_days") or 0) or None
+
+    try:
+        tweets = get_recent_tweets(
+            handles, handle_limit=handle_limit, oldest_days=oldest_days
+        )
+    except Exception:
+        log.exception("get_recent_tweets crashed")
+        tweets = []
+
     out: List[dict] = []
-    for raw in items or []:
-        norm = _normalize_source_item(raw, project_key, "twitter")
+    for tw in tweets or []:
+        # Приводим к унифицированной структуре; текст кладём в body, url — статус X
+        item = {
+            "id": f"tw:{tw.get('handle','')}:{tw.get('id','')}",
+            "title": tw.get("title") or "",
+            "body": tw.get("text") or "",
+            "url": tw.get("status_url") or "",
+            "ts": tw.get("datetime") or None,
+            "author": tw.get("handle") or "",
+            "media": tw.get("media") or [],
+            "channel": tw.get("handle")
+            or "",  # чтобы попал в базовый id-хэш при отсутствии id
+            "source": "twitter",
+            "project_key": project_key,
+        }
+        # Нормализация + схема
+        norm = _normalize_source_item(item, project_key, "twitter")
         if norm:
             out.append(_apply_schema(norm))
+
     return out
 
 
-# Ф-ция: собрать RSS-новости
+# RSS: через адаптер (если есть), иначе пусто
 def _pull_rss(project_key: str, app_cfg: dict) -> List[dict]:
     src_cfg = (app_cfg.get("sources") or {}).get("rss") or {}
     if not src_cfg.get("enabled", False):
         return []
-    try:
-        items = _call_adapter_pull("app.adapters.news.rss", project_key, app_cfg)
-    except Exception:
-        items = []
+    items = _call_adapter_pull("app.adapters.news.rss", project_key, app_cfg)
     out: List[dict] = []
     for raw in items or []:
         norm = _normalize_source_item(raw, project_key, "rss")
@@ -190,7 +229,7 @@ def _pull_rss(project_key: str, app_cfg: dict) -> List[dict]:
     return out
 
 
-# Ф-ция: собрать все источники по проекту
+# Собрать все источники по проекту
 def _pull_all_sources_for_project(project_key: str, app_cfg: dict) -> List[dict]:
     collected: List[dict] = []
     collected += _pull_slack(project_key, app_cfg)
@@ -199,7 +238,7 @@ def _pull_all_sources_for_project(project_key: str, app_cfg: dict) -> List[dict]
     return collected
 
 
-# Ф-ция: сохранить элементы через core.storage; возвращает (saved, skipped)
+# Сохранение через core.storage.save_news_item; возвращает (saved, skipped)
 def _persist_items(items: List[dict], *, dry_run: bool) -> Tuple[int, int]:
     saved = skipped = 0
     for it in items:
@@ -209,7 +248,8 @@ def _persist_items(items: List[dict], *, dry_run: bool) -> Tuple[int, int]:
                 continue
             uid = str(it.get("id") or "")
             project_key = str(it.get("project_key") or "project")
-            save_news_item(project_key, uid, it, when=_parse_iso_to_dt(it.get("ts")))
+            when = _parse_iso_to_dt(it.get("ts"))
+            save_news_item(project_key, uid, it, when=when)
             saved += 1
         except Exception:
             skipped += 1
@@ -217,7 +257,7 @@ def _persist_items(items: List[dict], *, dry_run: bool) -> Tuple[int, int]:
     return saved, skipped
 
 
-# Ф-ция: распарсить ISO-строку в datetime (лучше передавать ISO из schema)
+# ISO → datetime
 def _parse_iso_to_dt(v: Any) -> Optional[datetime]:
     if isinstance(v, str):
         try:
@@ -271,9 +311,10 @@ def run_news_once() -> dict:
     }
 
 
-# CLI-обертка: локальный прогон через `python -m core.news.runner`
+# CLI-обёртка: локальный прогон → `python -m core.news.runner`
 def main():
     res = run_news_once()
+    log.info("cli.news finished: %s", res)
     print(res)
 
 

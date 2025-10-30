@@ -23,7 +23,7 @@ crm:
   kommo:
     base_url: "https://officenodersteam.kommo.com/"
     access_token: "PASTE_TOKEN"       # секрет редактируется
-    secret_key: "Nr7KQdR7WORUyw8ShYHvstH8FGCAHKJDhIfZU6zQiQLsDb9ycY7tLKLxOpRztuxA"
+    secret_key: "M221URryCZVa6oONt2nKDU50YRtqlM6a6HI7R74V9pRGCqaVTEEq9Dk12kgibmX7"
     integration_id: "984f9863-f55c-475b-a3aa-18afd34bbde2"
     stages_map: "config/stages.map.json"
     # Произвольные поля и режимы — тянем как есть, если юзер их добавил в settings.yml.

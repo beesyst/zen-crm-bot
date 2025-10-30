@@ -128,7 +128,7 @@ def _decode_nitter_pic_url(src: str) -> str:
 
 
 # Универсальный playwright-фетчер (прямой X) через playwright.js
-def _run_playwright_x(u: str, timeout: int = 60) -> dict:
+def _run_playwright_x(u: str, timeout: int = 90) -> dict:
     host = urlparse(u).netloc.lower().replace("www.", "")
     if host not in ("x.com", "twitter.com"):
         return {}
@@ -143,9 +143,9 @@ def _run_playwright_x(u: str, timeout: int = 60) -> dict:
                 "--timeout",
                 str(int(max(1, timeout) * 1000)),
                 "--retries",
-                "1",
+                "2",
                 "--wait",
-                "domcontentloaded",
+                "networkidle",
                 "--ua",
                 UA or "",
                 "--twitterProfile",
@@ -153,7 +153,7 @@ def _run_playwright_x(u: str, timeout: int = 60) -> dict:
             cwd=os.path.dirname(script),
             capture_output=True,
             text=True,
-            timeout=timeout + 5,
+            timeout=timeout + 15,
         )
     except Exception as e:
         logger.warning("playwright.js run error for %s: %s", u, e)
@@ -201,6 +201,56 @@ def _extract_urls_from_text(text: str) -> list[str]:
             out.append(uu)
             seen.add(uu)
     return out
+
+
+# Парсер твитов из HTML X (fallback после Nitter)
+def _extract_x_tweets_from_html(html: str, handle: str, limit: int = 5) -> List[dict]:
+    if not html:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    items: List[dict] = []
+    for art in soup.find_all("article"):
+        try:
+            t = art.select_one("time[datetime]")
+            if not t:
+                continue
+            dt = (t.get("datetime") or "").strip()
+
+            a = art.select_one("a[href*='/status/']")
+            href = (a.get("href") or "").strip() if a else ""
+            m = re.search(r"/status/(\d+)", href)
+            tw_id = m.group(1) if m else ""
+            if not tw_id:
+                continue
+
+            text = re.sub(r"\s+", " ", art.get_text(" ", strip=True)).strip()
+            title = (text[:117] + "…") if len(text) > 120 else text
+
+            media = []
+            for img in art.select("img[src]"):
+                src = (img.get("src") or "").strip()
+                if src and "twimg.com" in src:
+                    media.append(force_https(src))
+            media = list(dict.fromkeys(media))
+
+            status_url = f"https://x.com/{handle}/status/{tw_id}"
+            items.append(
+                {
+                    "id": tw_id,
+                    "status_url": status_url,
+                    "handle": handle,
+                    "datetime": dt,
+                    "text": text,
+                    "title": title,
+                    "media": media,
+                }
+            )
+        except Exception:
+            continue
+
+        if len(items) >= max(1, limit):
+            break
+    return items
 
 
 # Вспомогательная функция рядом с остальными хелперами
@@ -865,3 +915,84 @@ def reset_verified_state(full: bool = False) -> None:
             _PARSED_CACHE.clear()
         except Exception:
             pass
+
+
+# Публичная обертка для получения твитов (через Nitter)
+def get_recent_tweets(
+    handles: list[str], handle_limit: int = 5, oldest_days: int | None = None
+) -> list[dict]:
+    from core.parser.nitter import fetch_tweets as _nitter_fetch
+
+    out = []
+    per_handle_limit = max(1, int(handle_limit or 5))
+
+    for h in handles or []:
+        items = []
+        # 1) пробуем Nitter
+        try:
+            items = (
+                _nitter_fetch(h, limit=per_handle_limit, oldest_days=oldest_days) or []
+            )
+        except Exception:
+            items = []
+
+        # fallback на X (если Nitter пуст)
+        if not items:
+            try:
+                # один фолбек-вызов, усиленные ожидания внутри _run_playwright_x
+                data = _run_playwright_x(f"https://x.com/{h}", timeout=90) or {}
+                html = (
+                    (data.get("twitter_profile") or {}).get("html")
+                    or data.get("html")
+                    or ""
+                )
+                if html:
+                    items = (
+                        _extract_x_tweets_from_html(html, h, limit=per_handle_limit)
+                        or []
+                    )
+                    logger.info(
+                        "Playwright GET+parse: https://x.com/%s → tweets=%d",
+                        h,
+                        len(items),
+                    )
+                else:
+                    fin = data.get("finalUrl") or ""
+                    err = (data.get("timing") or {}).get("error") or ""
+                    logger.info(
+                        "[twitter] Playwright пустой ответ: https://x.com/%s (final=%s, error=%s)",
+                        h,
+                        fin,
+                        err,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "playwright.js parse error for https://x.com/%s: %s", h, e
+                )
+
+        out.extend(items or [])
+
+    # сортировка по времени, если есть datetime
+    try:
+        import datetime as _dt
+
+        def _key(it):
+            dt = (it or {}).get("datetime") or ""
+            try:
+                return _dt.datetime.fromisoformat(dt.replace("Z", "+00:00"))
+            except Exception:
+                return _dt.datetime.min
+
+        out.sort(key=_key, reverse=True)
+    except Exception:
+        pass
+
+    # легкий дедуп по (handle,id)
+    seen = set()
+    deduped = []
+    for it in out:
+        k = (it.get("handle", ""), it.get("id", ""))
+        if k not in seen:
+            seen.add(k)
+            deduped.append(it)
+    return deduped
