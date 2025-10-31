@@ -97,7 +97,8 @@ def save_news_item(
 
     # 4) обогащаем минимальными полями
     to_save = dict(item)
-    to_save.setdefault("project_key", project_key)
+    to_save.pop("project_key", None)
+    to_save.setdefault("project", project_key)
     to_save.setdefault("id", uid)
     if ts:
         # нормализуем ts к ISO + Z

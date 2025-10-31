@@ -129,16 +129,25 @@ def twitter_to_x(u: str | None) -> str:
     if not s:
         return ""
 
-    # прямой профиль /<handle>
-    m = re.match(
-        r"^https://(?:www\.)?(?:twitter\.com|x\.com)/([A-Za-z0-9_]{1,15})(?:[/?#].*)?$",
-        s,
-        re.I,
-    )
-    if m:
-        return f"https://x.com/{m.group(1)}"
+    # если это статус/любая вложенная страница (включая /status/, /i/...), ничего не меняем
+    try:
+        p = urlparse(s)
+        host = (p.netloc or "").lower().replace("www.", "")
+        path = p.path or "/"
+        if host in {"twitter.com", "x.com"}:
+            # статусные и служебные пути оставляем как есть
+            if re.search(r"/status/\d+", path, re.I) or re.match(
+                r"^/i/(\b|/)", path, re.I
+            ):
+                return s.rstrip("/")
+            # канонизируем только ЧИСТЫЙ профиль /<handle>
+            m = re.match(r"^/([A-Za-z0-9_]{1,15})/?$", path)
+            if m:
+                return f"https://x.com/{m.group(1)}"
+    except Exception:
+        pass
 
-    # intent/follow?screen_name=<handle>
+    # intent/follow?screen_name=<handle> → профиль
     m = re.match(
         r"^https://(?:www\.)?twitter\.com/(?:intent/follow|intent/user)\b", s, re.I
     )
@@ -153,7 +162,7 @@ def twitter_to_x(u: str | None) -> str:
         except Exception:
             pass
 
-    # i/flow/login?redirect_after_login=%2F<handle>
+    # i/flow/login?redirect_after_login=... → не трогаем статусные ссылки, профиль - канонизируем
     if "redirect_after_login" in s:
         from urllib.parse import parse_qs, unquote, urlparse
 
@@ -162,15 +171,17 @@ def twitter_to_x(u: str | None) -> str:
             redir = (qs.get("redirect_after_login") or [""])[0]
             if redir:
                 redir = force_https(unquote(redir))
+                pp = urlparse(redir)
+                if re.search(r"/status/\d+", pp.path or "", re.I):
+                    return s.rstrip("/")
                 m2 = re.match(
-                    r"^https://(?:www\.)?(?:twitter\.com|x\.com)/([A-Za-z0-9_]{1,15})(?:[/?#].*)?$",
+                    r"^https://(?:www\.)?(?:twitter\.com|x\.com)/([A-Za-z0-9_]{1,15})/?$",
                     redir,
                     re.I,
                 )
                 if m2:
                     return f"https://x.com/{m2.group(1)}"
-                # если там просто "/<handle>"
-                m3 = re.match(r"^/([A-Za-z0-9_]{1,15})(?:[/?#].*)?$", redir)
+                m3 = re.match(r"^/([A-Za-z0-9_]{1,15})/?$", redir)
                 if m3:
                     return f"https://x.com/{m3.group(1)}"
         except Exception:
@@ -185,8 +196,12 @@ def twitter_to_x(u: str | None) -> str:
             for key in ("url", "u", "to", "target", "redirect", "redirect_uri"):
                 for cand in qs.get(key, []):
                     cand = force_https(unquote(cand or ""))
+                    # статусные не трогаем
+                    pp = urlparse(cand)
+                    if re.search(r"/status/\d+", (pp.path or ""), re.I):
+                        return s.rstrip("/")
                     m4 = re.match(
-                        r"^https://(?:www\.)?(?:twitter\.com|x\.com)/([A-Za-z0-9_]{1,15})(?:[/?#].*)?$",
+                        r"^https://(?:www\.)?(?:twitter\.com|x\.com)/([A-Za-z0-9_]{1,15})/?$",
                         cand,
                         re.I,
                     )
@@ -195,8 +210,8 @@ def twitter_to_x(u: str | None) -> str:
         except Exception:
             pass
 
-    # иначе - просто чистим хвосты, но без насильной канонизации
     return s.rstrip("/")
+
 
 # Хелпер для списков твиттер-URL
 def twitter_list_to_x(urls: list[str] | None) -> list[str]:

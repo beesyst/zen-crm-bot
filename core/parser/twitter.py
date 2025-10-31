@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import subprocess
 from typing import Dict, List
@@ -134,6 +135,8 @@ def _run_playwright_x(u: str, timeout: int = 90) -> dict:
         return {}
     script = os.path.join(os.path.dirname(__file__), "playwright.js")
     try:
+        SOCIAL_HOSTS = "t.co,linktr.ee,github.com,discord.com,telegram.me,medium.com,docs.google.com"
+
         res = subprocess.run(
             [
                 "node",
@@ -145,7 +148,9 @@ def _run_playwright_x(u: str, timeout: int = 90) -> dict:
                 "--retries",
                 "2",
                 "--wait",
-                "networkidle",
+                "domcontentloaded",
+                "--waitSocialHosts",
+                SOCIAL_HOSTS,
                 "--ua",
                 UA or "",
                 "--twitterProfile",
@@ -155,6 +160,7 @@ def _run_playwright_x(u: str, timeout: int = 90) -> dict:
             text=True,
             timeout=timeout + 15,
         )
+
     except Exception as e:
         logger.warning("playwright.js run error for %s: %s", u, e)
         return {}
@@ -344,7 +350,7 @@ def get_links_from_x_profile(
 
     parsed: dict = {}
 
-    # если nitter вкл - пробуем его первым
+    # если nitter вкл
     if NITTER_ENABLED:
         parsed = parse_profile(safe) or {}
 
@@ -357,12 +363,10 @@ def get_links_from_x_profile(
     if need_pw:
         if not NITTER_ENABLED:
             logger.info("Nitter выключен → включаем Playwright: %s", safe)
-        # при выключенном nitter - всегда пробуем и /photo, чтобы вытащить аву
-        tries = (
-            [safe, safe.rstrip("/") + "/photo"]
-            if (need_avatar or not NITTER_ENABLED)
-            else [safe]
-        )
+        tries = [safe]
+        if need_avatar:
+            tries.append(safe.rstrip("/") + "/photo")
+
         for try_url in tries:
             data = _run_playwright_x(try_url)
 
@@ -376,17 +380,12 @@ def get_links_from_x_profile(
             avatar_js = (tp.get("avatar") or "").strip()
             name_js = (tp.get("name") or "").strip()
 
-            # ссылки из JS-структуры
+            # ссылки из JS-структуры (+ бэкап и сбор из BIO/UserUrl)
             links_raw = list(tp.get("links") or [])
-
-            # бэкап: старый формат
             if not links_raw and isinstance(data.get("links"), list):
                 links_raw = list(data.get("links") or [])
 
-            # ссылки из блока "UserUrl" (под био). Пытаемся взять прямые поля, а если их нет - распарсить html
-            header_urls: list[str] = []
-
-            # частые поля, которые отдают парсером (на всякий случай поддерживаем набор ключей)
+            header_urls = []
             for key in ("url", "website", "user_url", "userUrl", "header_links"):
                 v = tp.get(key)
                 if isinstance(v, str) and v:
@@ -396,11 +395,9 @@ def get_links_from_x_profile(
                         if isinstance(it, str):
                             header_urls.extend(_extract_urls_from_text(it))
 
-            # fallback: если парсер вернул html профиля - выдернем href из data-testid="UserUrl"
             html_profile = (tp.get("html") or "") or (data.get("html") or "")
             if html_profile:
                 try:
-                    # href у ссылки с data-testid="UserUrl"
                     for m in re.finditer(
                         r'data-testid="UserUrl"[^>]*href="([^"]+)"',
                         html_profile,
@@ -410,7 +407,6 @@ def get_links_from_x_profile(
                 except Exception:
                     pass
 
-            # нормализуем и дедупим header_urls
             header_urls = [
                 force_https(_coerce_url(u)).rstrip("/") for u in header_urls if u
             ]
@@ -421,13 +417,10 @@ def get_links_from_x_profile(
                     _seen_h.add(u)
             header_urls = _hdr
 
-            # достаем реальные URL из видимого BIO-текста
             bio_text = (tp.get("bio") or "").strip()
             bio_urls = _extract_urls_from_text(bio_text)
 
-            # объединяем: сначала сырые (возможно t.co), затем видимые из BIO (обычно уже linktr.ee / офсайт)
-            merged = []
-            seen = set()
+            merged, seen = [], set()
             for cand in links_raw + header_urls + bio_urls:
                 uu = force_https(cand).rstrip("/")
                 if uu and uu not in seen:
@@ -436,7 +429,6 @@ def get_links_from_x_profile(
 
             links_js = _expand_short_links(merged)
 
-            # выкидываем коротыши (t.co и пр.), если уже появились развернутые аналоги
             SHORTENER_HOSTS = {
                 "t.co",
                 "bit.ly",
@@ -473,7 +465,6 @@ def get_links_from_x_profile(
                     "name": name_js,
                 }
                 break
-
             else:
                 err = (data.get("timing") or {}).get("error") or ""
                 fin = data.get("finalUrl") or ""
@@ -917,6 +908,233 @@ def reset_verified_state(full: bool = False) -> None:
             pass
 
 
+# Выбор любого доступного инстанса Nitter из конфига
+def _pick_nitter_base() -> str:
+    cfg = get_nitter_cfg() or {}
+    inst = cfg.get("instances") or []
+    if not inst:
+        return "https://nitter.net"
+    return random.choice(inst)
+
+
+# Подтянуть тред (реплаи того же автора) для данного статуса
+def fetch_tweet_thread_via_nitter(
+    handle: str, tweet_id: str, *, limit_replies: int = 12, timeout: int = 15
+) -> list[dict]:
+    base = _pick_nitter_base()
+    url = f"{base}/{handle}/status/{tweet_id}"
+    try:
+        r = requests.get(url, timeout=timeout, headers={"User-Agent": get_http_ua()})
+        if r.status_code != 200 or not r.text:
+            return []
+    except Exception:
+        return []
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    replies: list[dict] = []
+
+    # ищем элементы ответов в основном треде
+    for art in soup.select(
+        "div.main-thread > div.replies > .timeline > .timeline-item"
+    ):
+        a_user = art.select_one("a.username")
+        if not a_user:
+            continue
+        author = (a_user.get_text(strip=True) or "").lstrip("@").lower()
+        if author != handle.lower():
+            continue
+
+        a_link = art.select_one("a[href*='/status/']")
+        href = a_link.get("href", "") if a_link else ""
+        m = re.search(r"/status/(\d+)", href)
+        child_id = m.group(1) if m else ""
+        if not child_id:
+            continue
+
+        # компактный текст ответа
+        txt = re.sub(r"\s+", " ", art.get_text(" ", strip=True)).strip()
+        if len(txt) > 800:
+            txt = txt[:800] + "…"
+
+        replies.append(
+            {
+                "id": child_id,
+                "text": txt,
+                "status_url": (
+                    force_https(urljoin(base, href))
+                    if href
+                    else f"https://x.com/{handle}/status/{child_id}"
+                ),
+            }
+        )
+        if len(replies) >= limit_replies:
+            break
+
+    return replies
+
+
+# Возврат {"videos": [..], "images": [..]} из страницы статуса Nitter
+def fetch_tweet_media_via_nitter(
+    handle: str,
+    tweet_id: str,
+    *,
+    timeout: int = 15,
+    base: str | None = None,
+) -> dict:
+    base = (base or "").strip() or _pick_nitter_base()
+    url = f"{base}/{handle}/status/{tweet_id}"
+    try:
+        r = requests.get(url, timeout=timeout, headers={"User-Agent": get_http_ua()})
+        if r.status_code != 200 or not r.text:
+            return {"videos": [], "images": []}
+    except Exception:
+        return {"videos": [], "images": []}
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    videos, images = [], []
+
+    # видео: data-url/src на <video>, <source src>, а также ссылки вида /video/...
+    for vc in soup.select(
+        "div.video-container, div.attachment.video-container, div.gallery-video div.attachment.video-container"
+    ):
+        v = vc.select_one("video[data-url], video[src]")
+        if v:
+            m3u8 = (v.get("data-url") or v.get("src") or "").strip()
+            if m3u8:
+                videos.append(urljoin(base, m3u8))
+            poster = (v.get("poster") or "").strip()
+            if poster:
+                images.append(urljoin(base, poster))
+        for s in vc.select("source[src]"):
+            m3 = (s.get("src") or "").strip()
+            if m3:
+                videos.append(urljoin(base, m3))
+
+    for a in soup.select("a[href*='/video/']"):
+        href = (a.get("href") or "").strip()
+        if href:
+            videos.append(urljoin(base, href))
+
+    # картинки: <img src> + still-image (/pic/…)
+    for img in soup.select("div.attachments img[src], div.gallery-row img[src]"):
+        src = (img.get("src") or "").strip()
+        if src:
+            images.append(urljoin(base, src))
+
+    for a in soup.select("a.still-image[href], a[href^='/pic/']"):
+        href = (a.get("href") or "").strip()
+        if href:
+            images.append(urljoin(base, href))
+
+    # OpenGraph фолбэки
+    og_img = soup.select_one(
+        "meta[property='og:image'][content], meta[name='og:image'][content]"
+    )
+    if og_img:
+        images.append((og_img.get("content") or "").strip())
+    og_vid = soup.select_one(
+        "meta[property='og:video'][content], meta[name='og:video'][content]"
+    )
+    if og_vid:
+        videos.append((og_vid.get("content") or "").strip())
+
+    def _dedup(xs):
+        seen, out = set(), []
+        for u in xs:
+            uu = force_https(u).rstrip("/")
+            if uu and uu not in seen:
+                seen.add(uu)
+                out.append(uu)
+        return out
+
+    return {"videos": _dedup(videos), "images": _dedup(images)}
+
+
+# Возврат списка URL для attachments: сперва прямой m3u8 (если есть), затем постер (картинка)
+def get_tweet_attachments(
+    handle: str,
+    tweet_id: str,
+    *,
+    timeout: int = 15,
+    base: str | None = None,
+) -> list[str]:
+    media = (
+        fetch_tweet_media_via_nitter(handle, tweet_id, timeout=timeout, base=base) or {}
+    )
+    videos = list(media.get("videos") or [])
+    images = list(media.get("images") or [])
+
+    def _decode_nitter_video(u: str) -> str:
+        # nitter: /video/<token>/<ENCODED_HTTPS_URL> → https://video.twimg.com/...m3u8
+        try:
+            p = urlparse(u)
+            if "/video/" in (p.path or ""):
+                encoded = u.split("/video/", 1)[1].split("/", 1)[1]
+                decoded = unquote(encoded).replace("&amp;", "&")
+                return force_https(decoded).rstrip("/")
+        except Exception:
+            pass
+        return force_https(u).rstrip("/")
+
+    def _decode_nitter_pic(u: str) -> str:
+        # nitter: /pic/<encoded> → https://pbs.twimg.com/...
+        try:
+            p = urlparse(u)
+            if "/pic/" in (p.path or ""):
+                s = p.path.split("/pic/", 1)[1]
+                s = unquote(s)
+                if s.startswith("//"):
+                    s = "https:" + s
+                elif s.startswith("http://"):
+                    s = "https://" + s[7:]
+                elif not s.startswith("https://"):
+                    s = "https://" + s.lstrip("/")
+                return force_https(s).rstrip("/")
+        except Exception:
+            pass
+        return force_https(u).rstrip("/")
+
+    out: list[str] = []
+
+    # видео первым элементом
+    for v in videos:
+        out.append(_decode_nitter_video(v))
+
+    # постер/картинка как второй элемент (если есть)
+    if images:
+        out.append(_decode_nitter_pic(images[0]))
+
+    # дедуп
+    seen, deduped = set(), []
+    for u in out:
+        if u and u not in seen:
+            seen.add(u)
+            deduped.append(u)
+    return deduped
+
+
+# Для каждого родительского твита подтягиваем тред; не влияет на handle_limit
+def _enrich_with_threads(items: list[dict], *, thread_limit: int = 12) -> list[dict]:
+    out = []
+    for it in items or []:
+        handle = it.get("handle", "")
+        tid = it.get("id", "")
+        if not handle or not tid:
+            out.append(it)
+            continue
+        try:
+            thread = (
+                fetch_tweet_thread_via_nitter(handle, tid, limit_replies=thread_limit)
+                or []
+            )
+        except Exception:
+            thread = []
+        new_it = dict(it)
+        new_it["thread"] = thread
+        out.append(new_it)
+    return out
+
+
 # Публичная обертка для получения твитов (через Nitter)
 def get_recent_tweets(
     handles: list[str], handle_limit: int = 5, oldest_days: int | None = None
@@ -935,6 +1153,37 @@ def get_recent_tweets(
             )
         except Exception:
             items = []
+
+        # нормализация твитов от Nitter: гарантируем handle, id, status_url
+        normed = []
+        for it in items or []:
+            it2 = dict(it)
+            # handle: если не пришел - проставим текущий
+            it2["handle"] = (it.get("handle") or h).strip()
+
+            # id: пытаемся взять как есть либо выдрать из status_url/url
+            tid = (it.get("id") or "").strip()
+            if not tid:
+                import re
+
+                for k in ("status_url", "url"):
+                    u = (it.get(k) or "").strip()
+                    m = re.search(r"/status/(\d+)", u)
+                    if m:
+                        tid = m.group(1)
+                        break
+            if not tid:
+                # без id медиа не подтянуть - пропускаем такой элемент
+                continue
+            it2["id"] = tid
+
+            # status_url: строим, если нет
+            if not (it.get("status_url") or "").strip():
+                it2["status_url"] = f"https://x.com/{it2['handle']}/status/{tid}"
+
+            normed.append(it2)
+
+        items = normed
 
         # fallback на X (если Nitter пуст)
         if not items:
@@ -995,4 +1244,61 @@ def get_recent_tweets(
         if k not in seen:
             seen.add(k)
             deduped.append(it)
+
+    # тянем тред (реплаи автора) для каждого твита
+    try:
+        deduped = _enrich_with_threads(deduped, thread_limit=12)
+    except Exception:
+        pass
+
+    # тянем медиа со страницы статуса только если их нет после первичного парсинга
+    try:
+        enriched = []
+        for it in deduped:
+            h = (it.get("handle") or "").strip()
+            tid = (it.get("id") or "").strip()
+            base = (it.get("nitter_base") or "").strip()
+            new_it = dict(it)
+
+            has_inline = bool(
+                new_it.get("attachments")
+                or new_it.get("videos")
+                or new_it.get("images")
+            )
+            if h and tid and not has_inline:
+                media = fetch_tweet_media_via_nitter(h, tid, base=base) or {}
+                vids = list(media.get("videos") or [])
+                imgs = list(media.get("images") or [])
+                atts = get_tweet_attachments(h, tid, base=base) or []
+                mm = list(dict.fromkeys((new_it.get("media") or []) + imgs + vids))
+                new_it["media"] = mm
+                new_it["videos"] = vids
+                new_it["attachments"] = atts
+
+            # если уже есть - просто нормализуем уникальность
+            else:
+                imgs = list(new_it.get("images") or new_it.get("media") or [])
+                vids = list(new_it.get("videos") or [])
+                atts = list(new_it.get("attachments") or [])
+
+                # лёгкая дедуп/нормализация вывода
+                def _uniq(xs):
+                    seen, out = set(), []
+                    for u in xs:
+                        uu = force_https(u).rstrip("/")
+                        if uu and uu not in seen:
+                            seen.add(uu)
+                            out.append(uu)
+                    return out
+
+                new_it["images"] = _uniq(imgs)
+                new_it["media"] = _uniq(imgs + vids)
+                new_it["videos"] = _uniq(vids)
+                new_it["attachments"] = _uniq(atts)
+
+            enriched.append(new_it)
+        deduped = enriched
+    except Exception:
+        pass
+
     return deduped

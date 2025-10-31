@@ -267,21 +267,31 @@ async function browserFetch(opts) {
 
       // надежная навигация с несколькими вариантами waitUntil
       async function robustGoto(p, targetUrl) {
+        // жесткий потолок на одну попытку (SPA не зависают бесконечно)
+        const perTry = Math.min(timeout, 20000);
+
+        // если запрошен 'networkidle' — пробуем его ПОСЛЕДНИМ
+        const primary = (waitUntil === 'networkidle') ? 'domcontentloaded' : (waitUntil || 'domcontentloaded');
+
         const tries = [
-          { waitUntil: waitUntil || 'domcontentloaded', timeout },
-          { waitUntil: 'load',                           timeout },
-          { waitUntil: 'commit',                         timeout },
-          { waitUntil: 'networkidle',                    timeout },
+          { waitUntil: primary,      timeout: perTry },
+          { waitUntil: 'load',       timeout: perTry },
+          { waitUntil: 'commit',     timeout: perTry },
+          { waitUntil: 'networkidle',timeout: Math.min(timeout, 15000) },
         ];
+
         for (const opt of tries) {
           try {
             const r = await p.goto(targetUrl, opt);
-            try { await p.waitForLoadState('networkidle', { timeout: 12000 }); } catch {}
+            // мягкий прогрев после любой успешной навигации
+            try { await p.waitForLoadState('domcontentloaded', { timeout: 5000 }); } catch {}
+            try { await p.waitForLoadState('networkidle',      { timeout: 5000 }); } catch {}
             return r;
-          } catch (_e) { /* следующий режим */ }
+          } catch { /* следующий режим */ }
         }
         return null;
       }
+
 
       const resp = await robustGoto(page, url);
 

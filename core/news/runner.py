@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import re
 import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -9,7 +10,7 @@ from typing import Any, Iterable, List, Optional, Tuple
 
 import yaml
 from core.log_setup import get_logger
-from core.normalize import _strip_tracking_params, normalize_url
+from core.normalize import _strip_tracking_params, force_https, normalize_url
 from core.paths import CONFIG_DIR, PROJECT_ROOT
 from core.storage import save_news_item
 
@@ -102,15 +103,27 @@ def _normalize_source_item(raw: dict, project_key: str, source: str) -> Optional
         return None
     item = dict(raw)
 
-    # URL: легкая гигиена
+    # URL: бережно обрабатываем статусные X/Twitter-ссылки
     u = item.get("url") or item.get("link") or item.get("source_url") or ""
     if u:
-        u = normalize_url(u)
-        if u:
-            u = _strip_tracking_params(u)
-        item["url"] = u or None
+        try:
+            from urllib.parse import urlparse
 
-    # Время: unix → ISO, иначе оставляем строку как есть
+            p = urlparse(u)
+            host = (p.netloc or "").lower().replace("www.", "")
+            path = p.path or ""
+            if host in {"x.com", "twitter.com"} and "/status/" in path:
+                # статусный URL - оставляем как есть, только https + без завершающего слеша
+                item["url"] = force_https(u).rstrip("/")
+            else:
+                uu = normalize_url(u)
+                if uu:
+                    uu = _strip_tracking_params(uu)
+                item["url"] = uu or None
+        except Exception:
+            item["url"] = force_https(u).rstrip("/")
+
+    # время: unix → ISO, иначе оставляем строку как есть
     ts = item.get("ts") or item.get("timestamp")
     if isinstance(ts, (int, float)):
         item["ts"] = datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
@@ -119,14 +132,14 @@ def _normalize_source_item(raw: dict, project_key: str, source: str) -> Optional
     else:
         item.pop("ts", None)
 
-    # Детерминированный id, если не задан
+    # детерминированный id, если не задан
     if not item.get("id"):
         base = f"{project_key}:{source}:{item.get('channel') or ''}:{item.get('url') or item.get('title') or ''}"
         item["id"] = str(abs(hash(base)))
 
-    # Источник/проект
+    # источник/проект
     item["source"] = source
-    item["project_key"] = project_key
+    item["project"] = project_key
 
     return item
 
@@ -142,27 +155,77 @@ def _apply_schema(item: dict) -> dict:
         return item
 
 
+# Сворачивание Slack-реплаев (thread_ts) под родительское сообщение
+def _fold_slack_threads(items: List[dict]) -> List[dict]:
+    if not items:
+        return []
+
+    # индексы по ts и по thread_ts
+    by_ts: dict[str, dict] = {}
+    children: dict[str, list[dict]] = {}
+
+    for it in items:
+        ts = str(it.get("thread_ts") or it.get("ts") or "")
+        if not it.get("thread_ts") or str(it.get("thread_ts")) == str(it.get("ts")):
+            by_ts[str(it.get("ts"))] = it
+        else:
+            children.setdefault(str(it.get("thread_ts")), []).append(it)
+
+    out: List[dict] = []
+    for parent_ts, parent in by_ts.items():
+        replies = children.get(parent_ts, [])
+        # строим body
+        main_text = (parent.get("body") or parent.get("text") or "").strip()
+        lines = [main_text] if main_text else []
+        if replies:
+            lines += ["", f"--- Thread ({len(replies)}):"]
+            for r in replies:
+                rtext = (r.get("body") or r.get("text") or "").strip()
+                rlink = (r.get("permalink") or r.get("url") or "").strip()
+                if rtext and rlink:
+                    lines.append(f" • {rtext}  [{rlink}]")
+                elif rtext:
+                    lines.append(f" • {rtext}")
+                elif rlink:
+                    lines.append(f" • {rlink}")
+        merged = dict(parent)
+        merged["body"] = "\n".join(lines).strip()
+        # сырые реплаи в extra.thread (если extra нет - создаем)
+        extra = dict(merged.get("extra") or {})
+        extra["thread"] = replies
+        merged["extra"] = extra
+        out.append(merged)
+
+    # реплаи как отдельные записи в ленту не пушим
+    return out
+
+
 # Slack: через адаптер (если есть), иначе пусто
 def _pull_slack(project_key: str, app_cfg: dict) -> List[dict]:
     src_cfg = (app_cfg.get("sources") or {}).get("slack") or {}
     if not src_cfg.get("enabled", False):
         return []
     items = _call_adapter_pull("app.adapters.news.slack", project_key, app_cfg)
-    out: List[dict] = []
+
+    # нормализуем адаптерные записи
+    prelim: List[dict] = []
     for raw in items or []:
         norm = _normalize_source_item(raw, project_key, "slack")
         if norm:
-            out.append(_apply_schema(norm))
-    return out
+            prelim.append(_apply_schema(norm))
+
+    # сворачиваем треды Slack под родителя
+    folded = _fold_slack_threads(prelim)
+    return folded
 
 
-# X(Twitter): сначала пробуем адаптер, если пусто/нет — fallback на core.parser.twitter.get_recent_tweets
+# X(Twitter): сначала пробуем адаптер, если пусто/нет - fallback на core.parser.twitter.get_recent_tweets
 def _pull_twitter(project_key: str, app_cfg: dict) -> List[dict]:
     src_cfg = (app_cfg.get("sources") or {}).get("twitter") or {}
     if not src_cfg.get("enabled", False):
         return []
 
-    # 1) Попытка через внешний адаптер
+    # попытка через внешний адаптер
     items = _call_adapter_pull("app.adapters.news.twitter", project_key, app_cfg)
     if items:
         out: List[dict] = []
@@ -172,7 +235,7 @@ def _pull_twitter(project_key: str, app_cfg: dict) -> List[dict]:
                 out.append(_apply_schema(norm))
         return out
 
-    # 2) Fallback: напрямую через парсер (твои новые функции)
+    # fallback: напрямую через парсер (твои новые функции)
     try:
         from core.parser.twitter import get_recent_tweets
     except Exception:
@@ -193,26 +256,80 @@ def _pull_twitter(project_key: str, app_cfg: dict) -> List[dict]:
 
     out: List[dict] = []
     for tw in tweets or []:
-        # Приводим к унифицированной структуре; текст кладём в body, url — статус X
+        # вставляем тред в body
+        body = _build_twitter_body(tw.get("text") or "", tw.get("thread") or [])
+
+        # теги: из основного текста + строк треда
+        thread_text = "\n".join((r.get("text") or "") for r in (tw.get("thread") or []))
+        tags = _extract_hashtags(f"{tw.get('text') or ''}\n{thread_text}")
+
+        # attachments: m3u8 + постер из страницы статуса (через nitter)
+        attachments = list(tw.get("attachments") or [])
+
+        # fallback на URL статуса, если парсер его не дал
+        status_url = (tw.get("status_url") or "").strip()
+        if not status_url:
+            h = (tw.get("handle") or "").strip()
+            tid = (tw.get("id") or "").strip()
+            if h and tid:
+                status_url = f"https://x.com/{h}/status/{tid}"
+
         item = {
             "id": f"tw:{tw.get('handle','')}:{tw.get('id','')}",
             "title": tw.get("title") or "",
-            "body": tw.get("text") or "",
-            "url": tw.get("status_url") or "",
+            "body": body,
+            "url": status_url or tw.get("url") or "",
             "ts": tw.get("datetime") or None,
             "author": tw.get("handle") or "",
-            "media": tw.get("media") or [],
-            "channel": tw.get("handle")
-            or "",  # чтобы попал в базовый id-хэш при отсутствии id
+            "channel": tw.get("handle") or "",
             "source": "twitter",
-            "project_key": project_key,
+            "tags": tags,
+            "attachments": attachments,
+            "project": project_key,
+            "extra": {"thread": tw.get("thread") or []},
         }
-        # Нормализация + схема
         norm = _normalize_source_item(item, project_key, "twitter")
         if norm:
             out.append(_apply_schema(norm))
 
     return out
+
+
+# Сбор хештегов
+def _extract_hashtags(text: str) -> list[str]:
+    s = (text or "").strip()
+    if not s:
+        return []
+    # берем #слово из юникод-символов (\w в Python включает кириллицу при re.UNICODE)
+    tags = [
+        m.group(1).strip("_").lower()
+        for m in re.finditer(r"#([\w]{2,50})", s, re.UNICODE)
+    ]
+    # компактим и дедупим, сохраняя порядок
+    out, seen = [], set()
+    for t in tags:
+        if t and t not in seen:
+            out.append(t)
+            seen.add(t)
+    return out
+
+
+# Сбор body: основной твит + блок Thread(N) со ссылками на ответы автора
+def _build_twitter_body(main_text: str, thread: list[dict]) -> str:
+    main = (main_text or "").strip()
+    if not thread:
+        return main
+    lines = [main, "", f"--- Thread ({len(thread)}):"]
+    for r in thread:
+        t = (r.get("text") or "").strip()
+        link = (r.get("status_url") or "").strip()
+        if t and link:
+            lines.append(f" • {t}  [{link}]")
+        elif t:
+            lines.append(f" • {t}")
+        elif link:
+            lines.append(f" • {link}")
+    return "\n".join(lines)
 
 
 # RSS: через адаптер (если есть), иначе пусто
@@ -247,7 +364,7 @@ def _persist_items(items: List[dict], *, dry_run: bool) -> Tuple[int, int]:
                 skipped += 1
                 continue
             uid = str(it.get("id") or "")
-            project_key = str(it.get("project_key") or "project")
+            project_key = str(it.get("project") or "project")
             when = _parse_iso_to_dt(it.get("ts"))
             save_news_item(project_key, uid, it, when=when)
             saved += 1
@@ -288,6 +405,10 @@ def run_news_once() -> dict:
     for project_key, app_cfg, yml_path in apps:
         try:
             items = _pull_all_sources_for_project(project_key, app_cfg)
+            try:
+                items.sort(key=lambda x: (x.get("ts") or ""), reverse=True)
+            except Exception:
+                pass
             saved, skipped = _persist_items(items, dry_run=cfg.dry_run)
             total_saved += saved
             total_skipped += skipped
@@ -311,7 +432,7 @@ def run_news_once() -> dict:
     }
 
 
-# CLI-обёртка: локальный прогон → `python -m core.news.runner`
+# CLI-обертка: локальный прогон → `python -m core.news.runner`
 def main():
     res = run_news_once()
     log.info("cli.news finished: %s", res)

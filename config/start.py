@@ -656,7 +656,7 @@ def _pipeline_up(*, detached: bool, run_modes: bool) -> int:
         )
         m1 = _re.search(r"(\d+\.\d+\.\d+)", out1 or "")
         if rc1 == 0 and m1:
-            return True, f"{m1.group(1)} — image zencrm-app"
+            return True, f"{m1.group(1)} - image zencrm-app"
 
         # фолбэк: через npx (если по какой-то причине path не содержит симлинк)
         rc2, out2 = run_and_capture(
@@ -672,9 +672,9 @@ def _pipeline_up(*, detached: bool, run_modes: bool) -> int:
         )
         m2 = _re.search(r"(\d+\.\d+\.\d+)", out2 or "")
         if rc2 == 0 and m2:
-            return True, f"{m2.group(1)} — image zencrm-app"
+            return True, f"{m2.group(1)} - image zencrm-app"
 
-        return False, "not installed — image zencrm-app"
+        return False, "not installed - image zencrm-app"
 
     # печатаем в желаемом порядке
     step("image - zencrm-app", _image_app)

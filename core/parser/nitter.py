@@ -215,6 +215,9 @@ def _decode_nitter_pic_url(src: str) -> str:
     if s.startswith("/pic/"):
         s = s[len("/pic/") :]
     s = unquote(s)
+    if re.match(r"^/?(orig|media)/", s, re.I) and not s.startswith("http"):
+        s = "https://pbs.twimg.com/" + s.lstrip("/")
+
     if s.startswith("//"):
         s = "https:" + s
     elif s.startswith("http://"):
@@ -460,7 +463,48 @@ def parse_profile(url_or_handle: str) -> dict:
 
 # Извлечение твитов из HTML профиля Nitter
 def _extract_tweet_items(soup, inst_base, handle, limit: int) -> list[dict]:
+    # локальные декодеры, чтобы не плодить повторные походы в twitter.py
+    def _decode_video(u: str) -> str:
+        try:
+            p = urlparse(u)
+            if "/video/" in (p.path or ""):
+                encoded = u.split("/video/", 1)[1].split("/", 1)[1]
+                decoded = unquote(encoded).replace("&amp;", "&")
+                return force_https(decoded).rstrip("/")
+        except Exception:
+            pass
+        return force_https(u).rstrip("/")
+
+    # /pic/<encoded> → https://pbs.twimg.com/...
+    def _decode_pic(u: str) -> str:
+        try:
+            p = urlparse(u)
+            if "/pic/" in (p.path or ""):
+                s = p.path.split("/pic/", 1)[1]
+                s = unquote(s)
+                if s.startswith("//"):
+                    s = "https:" + s
+                elif s.startswith("http://"):
+                    s = "https://" + s[7:]
+                elif not s.startswith("https://"):
+                    s = "https://" + s.lstrip("/")
+                return force_https(s).rstrip("/")
+        except Exception:
+            pass
+        return force_https(u).rstrip("/")
+
+    def _dedup(seq: list[str]) -> list[str]:
+        seen, out = set(), []
+        for x in seq or []:
+            xx = force_https(x).rstrip("/")
+            if xx and xx not in seen:
+                seen.add(xx)
+                out.append(xx)
+        return out
+
     items = []
+    base = force_https(inst_base).rstrip("/")
+
     # поддерживаем обе разметки: article.timeline-item ИЛИ div.tweet-body
     for art in soup.select("article.timeline-item, div.tweet-body")[: max(1, limit)]:
         try:
@@ -475,18 +519,64 @@ def _extract_tweet_items(soup, inst_base, handle, limit: int) -> list[dict]:
             t = art.select_one(".tweet-date time[datetime]")
             dt = (t.get("datetime") or "").strip() if t else ""
 
-            # текст (учитываем оба варианта классов)
+            # текст
             text_el = art.select_one(".tweet-content, .tweet-content.media-body")
             text = text_el.get_text(" ", strip=True) if text_el else ""
             title = (text[:117] + "…") if len(text) > 120 else text
 
-            # медиа
-            media = []
-            for img in art.select("a.attachments img[src], div.attachment img[src]"):
+            # изображения (как было)
+            images = []
+            for img in art.select(
+                "a.attachments img[src], div.attachment img[src], "
+                "div.attachments img[src], div.gallery-row img[src], "
+                "div.attachment.image img[src], a.still-image img[src]"
+            ):
                 src = (img.get("src") or "").strip()
                 if src:
-                    media.append(_decode_nitter_pic_url(src))
-            media = list(dict.fromkeys(media))
+                    images.append(urljoin(base, src))
+            images = _dedup([_decode_pic(u) for u in images])
+
+            # видео: вытаскиваем прямо отсюда (без второго захода на статус)
+            videos_raw, posters_raw = [], []
+
+            # <video data-url|src poster=...>
+            for vc in art.select(
+                "div.gallery-video div.attachment.video-container, div.attachment.video-container"
+            ):
+                v = vc.select_one("video[data-url], video[src]")
+                if v:
+                    mu = (v.get("data-url") or v.get("src") or "").strip()
+                    if mu:
+                        videos_raw.append(urljoin(base, mu))
+                    poster = (v.get("poster") or "").strip()
+                    if poster:
+                        posters_raw.append(urljoin(base, poster))
+                for ssrc in vc.select("source[src]"):
+                    su = (ssrc.get("src") or "").strip()
+                    if su:
+                        videos_raw.append(urljoin(base, su))
+
+            # ссылки вида <a href="/video/...">
+            for a in art.select("a[href*='/video/']"):
+                hu = (a.get("href") or "").strip()
+                if hu:
+                    videos_raw.append(urljoin(base, hu))
+
+            # постеры как still-image
+            for a in art.select("a.still-image[href], a[href^='/pic/']"):
+                hu = (a.get("href") or "").strip()
+                if hu:
+                    posters_raw.append(urljoin(base, hu))
+
+            videos = _dedup([_decode_video(u) for u in videos_raw])
+            posters = _dedup([_decode_pic(u) for u in posters_raw])
+
+            # attachments: первым - m3u8, вторым - постер (если есть)
+            attachments: list[str] = []
+            if videos:
+                attachments.append(videos[0])
+            if posters:
+                attachments.append(posters[0])
 
             items.append(
                 {
@@ -496,7 +586,11 @@ def _extract_tweet_items(soup, inst_base, handle, limit: int) -> list[dict]:
                     "datetime": dt,
                     "text": text,
                     "title": title,
-                    "media": media,
+                    "media": images,
+                    "images": images,
+                    "videos": videos,
+                    "attachments": attachments,
+                    "nitter_base": inst_base,
                 }
             )
         except Exception:
